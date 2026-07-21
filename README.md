@@ -1,4 +1,4 @@
-# ai4cience-client
+# ai4science-client
 
 A thin Python client for running functions on Snellius through the
 [Surf-AI4Science](https://github.com/SURF-ML) API. Point it at a running
