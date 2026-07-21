@@ -11,8 +11,8 @@ styles.
 ## Structure
 
 ai4cience-client/
-├── .env                  
-├── .env.example          
+├── .env
+├── .env.example
 ├── src/
 ├── tests/
 ├── examples/
