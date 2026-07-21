@@ -18,9 +18,72 @@ from typing import Any, Callable
 import requests
 
 from .schemas import JobResult, JobSubmitRequest, JobSubmitResponse
-from .script_builder import build_script
+from .script_builder import RESULT_END, RESULT_START, build_script
 
 TERMINAL_STATUSES = ("completed", "failed")
+
+
+def _trailing_partial_match_len(text: str, needle: str) -> int:
+    """Length of the longest suffix of text that is also a prefix of
+    needle (excluding a full match). Used to detect "the marker string
+    has started arriving but isn't complete yet" at the very end of a
+    streamed buffer -- the classic streaming-substring-search problem.
+    """
+    for length in range(min(len(text), len(needle) - 1), 0, -1):
+        if text.endswith(needle[:length]):
+            return length
+    return 0
+
+
+def _display_text(raw_log: str) -> str:
+    """Turn raw log text into what a user should actually see while
+    streaming: the result marker block (base64-encoded JSON) replaced
+    with a decoded, human-readable line.
+
+    Must be stable under growth: for any raw_log and any longer raw_log
+    that starts with it, _display_text(longer) must start with
+    _display_text(shorter). This is what lets streaming diff the
+    *display* text incrementally, the same way it diffs raw text --
+    see _new_chunk. Concretely:
+
+    - No (complete or partial) RESULT_START yet -> return raw_log
+      unchanged.
+    - RESULT_START (even just a partial trailing fragment of it)
+      present but RESULT_END not yet -> hide everything from that
+      point onward (don't show partial base64, or a half-arrived
+      marker string itself, mid-poll).
+    - Both present -> replace the whole marker block with one decoded
+      line; anything after RESULT_END (e.g. "Job Finished...") is kept.
+    - If the block's content isn't valid base64/JSON, fall back to
+      showing it raw rather than silently hiding real output.
+    """
+    start_idx = raw_log.find(RESULT_START)
+    if start_idx == -1:
+        # No complete RESULT_START yet -- but the tail of raw_log might
+        # be a partial fragment of it (e.g. mid-poll). Hide that too.
+        partial_len = _trailing_partial_match_len(raw_log, RESULT_START)
+        return raw_log[: len(raw_log) - partial_len]
+
+    end_idx = raw_log.find(RESULT_END)
+    if end_idx == -1:
+        # Marker block started but hasn't fully arrived -- hide the
+        # partial block rather than show incomplete base64 gibberish.
+        return raw_log[:start_idx]
+
+    block_end = end_idx + len(RESULT_END)
+    encoded = raw_log[start_idx + len(RESULT_START) : end_idx].strip()
+
+    try:
+        import base64
+        import json
+
+        decoded = json.loads(base64.b64decode(encoded).decode("utf-8"))
+        replacement = f"[result received: {decoded!r}]"
+    except Exception:
+        # Don't hide real content behind a decoding bug -- show it raw.
+        replacement = raw_log[start_idx:block_end]
+
+    return raw_log[:start_idx] + replacement + raw_log[block_end:]
 
 
 def _new_chunk(full_text: str | None, seen_len: int) -> tuple[str, int]:
@@ -75,6 +138,7 @@ class Ai4ScienceJob:
 
     def __repr__(self) -> str:
         return f"Ai4ScienceJob(job_id={self.job_id!r})"
+
 
 class Ai4ScienceClient:
     """Client for an ai4science deployment.
@@ -189,7 +253,9 @@ class Ai4ScienceClient:
 
         If stream=True, also poll /logs/{job_id} each round and print
         (or call on_log with) only the new text since the last poll --
-        this is client-side tailing, not a real server-sent stream.
+        this is client-side tailing, not a real server-sent stream. The
+        raw result marker block is never shown -- once it fully
+        arrives, it's replaced with one decoded, human-readable line.
         """
         interval = self.default_interval if interval is None else interval
         on_log = on_log or (lambda text: print(text, end="", flush=True))
@@ -197,14 +263,14 @@ class Ai4ScienceClient:
         elapsed = 0
         while elapsed < timeout:
             if stream:
-                chunk, seen_len = _new_chunk(self.logs(job_id), seen_len)
+                chunk, seen_len = _new_chunk(_display_text(self.logs(job_id) or ""), seen_len)
                 if chunk:
                     on_log(chunk)
 
             result = self.results(job_id)
             if result.status in TERMINAL_STATUSES:
                 if stream:
-                    chunk, seen_len = _new_chunk(self.logs(job_id), seen_len)
+                    chunk, seen_len = _new_chunk(_display_text(self.logs(job_id) or ""), seen_len)
                     if chunk:
                         on_log(chunk)
                 return result
