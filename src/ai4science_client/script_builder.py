@@ -16,8 +16,8 @@ import json
 import textwrap
 from typing import Any, Callable
 
-RESULT_START = "###HIPPOCAMPUS_RESULT_START###"
-RESULT_END = "###HIPPOCAMPUS_RESULT_END###"
+RESULT_START = "###JOB RESULT_START###"
+RESULT_END = "###JOB RESULT_END###"
 
 
 class NotSelfContainedError(ValueError):
