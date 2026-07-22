@@ -18,69 +18,53 @@ ai4cience-client/
 ├── examples/
 ├── pyproject.toml
 └── README.md
-## Install
+## Running HPC jobs via ai4science-client
 
-```bash
-git clone https://github.com/SURF-ML/ai4cience-client.git
-cd ai4cience-client
-uv sync
-```
+### Install
 
-## Config
+Add to `pyproject.toml`:
 
-Copy the example env file and fill in your real values:
-
-```bash
-cp .env.example .env
+```toml
+dependencies = [
+    ...
+    'ai4science-client @ git+https://github.com/SURF-ML/ai4science-client.git',
+]
 ```
 
 ```bash
-export AI4SCIENCE_BASE_URL="https://ai4science.dev.sdp.surf.nl"
-export SLURM_USER="your_snellius_user"
-export SLURM_TOKEN="..."
-
-# optional, default 10 (seconds) -- used by wait()/run() when a call
-# doesn't specify its own interval
-export AI4SCIENCE_POLL_INTERVAL=10
+uv pip install -e .
 ```
 
-`.env` is gitignored and loaded automatically -- nothing else to configure.
-
-## Usage
-
-### Client
+### Example
 
 ```python
-from ai4science_client import Ai4ScienceClient
+from ai4science_client import Ai4ScienceClient, job
 
-client = Ai4ScienceClient.from_env()   # reads .env
+_BASE_URL = "https://ai4science.dev.sdp.surf.nl"
+_USER = ""      # your Snellius username
+_TOKEN = ""     # SLURM JWT (scontrol token)
+
+client = Ai4ScienceClient(base_url=_BASE_URL, user=_USER, token=_TOKEN)
 
 def custom_sum(x, y):
     return x + y
 
-result = client.run(custom_sum, 3, 4)  # 7
-```
+print(client.run(custom_sum, 1, 2, stream=True))
 
-Or construct explicitly, without a `.env` file:
 
-```python
-client = Ai4ScienceClient()
-```
-
-### Decorator
-
-```python
-from ai4science_client import job
-
-@job(
-    base_url="https://ai4science.dev.sdp.surf.nl",
-    user="your_snellius_user",
-    token=your_slurm_token,
-)
-def custom_sum(x, y):
+@job(base_url=_BASE_URL, user=_USER, token=_TOKEN, stream=True)
+def custom_sum_decorated(x, y):
     return x + y
 
-result = custom_sum(3, 4)  # 7
+print(custom_sum_decorated(1, 2))
+```
+
+`client.run(...)` and `@job(...)` submit the function to Snellius, block until it finishes, and return the result — same job, two calling styles. `stream=True` prints live log output while it runs.
+
+### Run it
+
+```bash
+uv run python your_script.py
 ```
 
 ### Dependencies
