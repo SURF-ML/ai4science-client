@@ -50,13 +50,22 @@ class Ai4ScienceConfig(BaseModel):
                 f"Missing required environment variable(s): {', '.join(missing)}. "
                 "Set them directly, or in a .env file (see .env.example)."
             )
+
+        interval_raw = os.environ.get("AI4SCIENCE_POLL_INTERVAL", "10")
+        try:
+            interval = int(interval_raw)
+        except ValueError as e:
+            raise ValueError(
+                f"AI4SCIENCE_POLL_INTERVAL must be an integer number of "
+                f"seconds, got {interval_raw!r}."
+            ) from e
+
         return cls(
             base_url=os.environ["AI4SCIENCE_BASE_URL"],
             user=os.environ["SLURM_USER"],
             token=os.environ["SLURM_TOKEN"],
-            interval=int(os.environ.get("AI4SCIENCE_POLL_INTERVAL", "10")),
+            interval=interval,
         )
-
 
 if __name__ == "__main__":
     import unittest.mock as mock

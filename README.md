@@ -85,6 +85,62 @@ def gpu_benchmark(matrix_size: int = 4096) -> dict:
 result = client.run(gpu_benchmark, 4096, dependencies=["torch"])
 ```
 
+### Slurm resources
+
+By default your job runs on the server's built-in defaults for its job
+type (partition, CPUs, memory, walltime, GPU). To override any subset of
+these, pass a `SlurmResourceConfig` -- anything you leave unset falls
+back to the server default, nothing is required:
+
+```python
+from ai4science_client import Ai4ScienceClient
+from ai4science_client.schemas import SlurmResourceConfig
+
+client = Ai4ScienceClient()
+
+resources = SlurmResourceConfig(
+    partition="genoa",        # see Snellius partitions: rome/thin, genoa,
+                               # fat_rome, fat_genoa, himem_4tb, himem_8tb,
+                               # gpu_a100, gpu_h100, gpu_mig, gpu_vis, staging
+    cpus_per_task=4,
+    memory_mb=8000,
+    time_limit_minutes=15,
+)
+
+def resource_check() -> dict:
+    import os
+    return {"partition": os.environ.get("SLURM_JOB_PARTITION")}
+
+result = client.run(resource_check, resources=resources)
+```
+
+Works identically with the decorator:
+
+```python
+from ai4science_client import job
+from ai4science_client.schemas import SlurmResourceConfig
+
+@job(
+    base_url="https://ai4science.dev.sdp.surf.nl",
+    user="your_snellius_user",
+    token=your_slurm_token,
+    resources=SlurmResourceConfig(
+        partition="gpu_h100",
+        cpus_per_task=16,
+        memory_mb=96000,
+        time_limit_minutes=240,
+        tres_per_node="gres:gpu:1",
+    ),
+)
+def train_step(x, y):
+    ...
+
+result = train_step(3, 4)
+```
+
+`submit()` accepts the same `resources=` argument if you're using the
+async/manual submission style below.
+
 ### Streaming
 
 Pass `stream=True` to see log output printed live while the call blocks
@@ -119,10 +175,11 @@ result = job_handle.wait()           # block until done, when ready
 ## Examples
 
 - **`examples/run_bench_hf.py`** -- a GPU benchmark (`torch`, matrix
-  multiply timing, real device info) and a HuggingFace sentiment-analysis
-  pipeline, both declared via `dependencies=[...]` with `stream=True` so
-  you can watch the install and run live. Verified against a real H100
-  node on Snellius.
+  multiply timing, real device info), a HuggingFace sentiment-analysis
+  pipeline (both declared via `dependencies=[...]` with `stream=True` so
+  you can watch the install and run live), and a small resource-scoped
+  job demonstrating explicit `resources=SlurmResourceConfig(...)`.
+  Verified against a real H100 node on Snellius.
 
 ```bash
 uv run python examples/run_bench_hf.py

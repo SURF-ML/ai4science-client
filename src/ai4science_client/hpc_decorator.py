@@ -13,6 +13,7 @@ import functools
 from typing import Callable
 
 from .client import Ai4ScienceClient
+from .schemas import SlurmResourceConfig
 
 
 def job(
@@ -25,6 +26,7 @@ def job(
     timeout: int = 3600,
     stream: bool = False,
     on_log: Callable[[str], None] | None = None,
+    resources: SlurmResourceConfig | None = None,
 ):
     """Decorator that runs the wrapped function on Snellius via ai4science.
 
@@ -35,10 +37,23 @@ def job(
     Set stream=True to print live log output while the call blocks
     (client-side tailing -- see Ai4ScienceClient.wait).
 
+    resources : optional overrides for cpus/memory/time/partition/gpu --
+        see Ai4ScienceClient.submit. Unset fields use the server's
+        defaults for ephemeral jobs.
+
+    Note on errors: base_url/user/token are validated immediately, when
+    the decorator is applied (fail fast) -- a bad value raises ValueError
+    at import/decoration time, not when the wrapped function is called.
+    Once the wrapped function *is* called, any failure (unreachable API,
+    rejected submission, timeout, job failure) raises the corresponding
+    exception from ai4science_client.exceptions -- see Ai4ScienceClient.run
+    for the full list. This decorator doesn't catch or rewrap any of them.
+
     Example
     -------
     >>> @job(base_url="https://ai4science.dev.sdp.surf.nl",
-    ...      user="juliusa", token=slurm_token)
+    ...      user="juliusa", token=slurm_token,
+    ...      resources=SlurmResourceConfig(cpus_per_task=32, memory_mb=64000))
     ... def custom_sum(x, y):
     ...     return x + y
     >>> custom_sum(3, 4)   # blocks, runs remotely, returns 7
@@ -58,6 +73,7 @@ def job(
                 timeout=timeout,
                 stream=stream,
                 on_log=on_log,
+                resources=resources,
                 **kwargs,
             )
 
