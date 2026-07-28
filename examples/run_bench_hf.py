@@ -25,6 +25,7 @@ from __future__ import annotations
 import sys
 
 from ai4science_client import Ai4ScienceClient
+from ai4science_client.schemas import SlurmResourceConfig
 
 
 def gpu_benchmark(matrix_size: int = 4096) -> dict:
@@ -69,6 +70,23 @@ def huggingface_sentiment(sentences: list[str]) -> list[dict]:
     return classifier(sentences)
 
 
+def resource_check() -> dict:
+    """A trivial job whose only purpose is to report what resources it
+    actually landed on -- used here to demonstrate requesting specific
+    Slurm resources via `resources=SlurmResourceConfig(...)`.
+    """
+    import multiprocessing
+    import os
+
+    return {
+        "hostname": os.uname().nodename,
+        "visible_cpus": multiprocessing.cpu_count(),
+        "slurm_cpus_per_task": os.environ.get("SLURM_CPUS_PER_TASK"),
+        "slurm_mem_per_node": os.environ.get("SLURM_MEM_PER_NODE"),
+        "slurm_job_partition": os.environ.get("SLURM_JOB_PARTITION"),
+    }
+
+
 def main() -> int:
 
     client = Ai4ScienceClient()
@@ -93,7 +111,23 @@ def main() -> int:
     )
     print(f"\n{sentiment}")
 
-    print("\nPASS: GPU benchmark and HuggingFace pipeline both ran via ai4science.")
+    print("\n--- Resource check (explicit cpus/memory/time/partition via resources=) ---")
+    resources = SlurmResourceConfig(
+        partition="genoa",
+        cpus_per_task=4,
+        memory_mb=8000,
+        time_limit_minutes=15,
+    )
+    check = client.run(
+        resource_check,
+        resources=resources,
+        timeout=600,
+    )
+    print(f"\n{check}")
+
+    print(
+        "\nPASS: GPU benchmark, HuggingFace pipeline, and resource-scoped job all ran via ai4science."
+    )
     return 0
 
 

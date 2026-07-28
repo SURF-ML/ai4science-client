@@ -12,6 +12,32 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 
+class SlurmResourceConfig(BaseModel):
+    """Optional overrides for Slurm resource parameters, sent to the
+    ai4science API. Field names must stay in sync with the server's
+    SlurmResourceConfig (app/common/schemas.py in ai4science-poc) -- this
+    is a plain duplicate, not a shared import, since this is a separate
+    package. Any field left as None means "use the server's default for
+    this job type."
+    """
+
+    partition: str | None = None
+    nodes: int | str | None = None
+    cpus_per_task: int | None = Field(default=None, ge=1)
+    tasks_per_node: int | None = Field(default=None, ge=1)
+    memory_mb: int | None = Field(
+        default=None, ge=1, description="Memory per node, in MB"
+    )
+    time_limit_minutes: int | None = Field(
+        default=None, ge=1, description="Wall-clock time limit, in minutes"
+    )
+    tres_per_node: str | None = Field(
+        default=None, description="Generic resource request, e.g. 'gres:gpu:1'"
+    )
+
+    model_config = {"extra": "forbid"}
+
+
 class JobSubmitRequest(BaseModel):
     """Body sent to POST /ephemeral-job."""
 
@@ -20,6 +46,7 @@ class JobSubmitRequest(BaseModel):
     user: str
     token: str
     hf_token: str | None = None
+    resources: SlurmResourceConfig | None = None
 
 
 class JobSubmitResponse(BaseModel):
@@ -32,6 +59,7 @@ class JobSubmitResponse(BaseModel):
 
     job_id: int
     status: str | None = None
+
 
 class JobResult(BaseModel):
     """Response from GET /results/{job_id}."""

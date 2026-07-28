@@ -53,6 +53,38 @@ def _check_self_contained(func: Callable) -> None:
         )
 
 
+def _get_source(func: Callable) -> str:
+    """Wrap inspect.getsource with a clear, actionable error.
+
+    getsource raises OSError when it can't locate the function's source
+    -- typically because func was defined interactively (a REPL/Jupyter
+    cell), via exec()/eval(), or its source file was deleted/moved since
+    import. That's a real and fairly common way this gets hit (people
+    iterating in notebooks before submitting a job), so it gets the same
+    NotSelfContainedError treatment as an actual closure, rather than a
+    raw OSError with no context.
+    """
+    try:
+        return inspect.getsource(func)
+    except OSError as e:
+        raise NotSelfContainedError(
+            f"Could not read the source of function '{func.__name__}'. "
+            "This usually means it was defined interactively (a REPL or "
+            "Jupyter cell) or via exec()/eval() -- functions run via "
+            "ai4science must be defined in a regular .py file that's "
+            "importable/readable at submit time."
+        ) from e
+    except TypeError as e:
+        # getsource also raises TypeError for builtins or other objects
+        # that were never valid Python source in the first place.
+        raise NotSelfContainedError(
+            f"'{func.__name__}' does not appear to be a plain Python "
+            "function with retrievable source (e.g. a builtin or "
+            "C-implemented callable). Only regular Python functions "
+            "defined in a .py file are supported."
+        ) from e
+
+
 def build_script(
     func: Callable,
     args: tuple[Any, ...] = (),
@@ -64,7 +96,8 @@ def build_script(
     ----------
     func : callable
         A self-contained function (no closures over outer variables; any
-        imports it needs must happen inside its own body).
+        imports it needs must happen inside its own body), defined in a
+        regular .py file (not the REPL, a notebook cell, or exec'd code).
     args, kwargs :
         Must be JSON-serializable (numbers, strings, lists, dicts).
 
@@ -73,11 +106,19 @@ def build_script(
     str
         A complete script, suitable as the ``python_script`` field of an
         ``/ephemeral-job`` request.
+
+    Raises
+    ------
+    NotSelfContainedError
+        If func closes over outer variables, or its source can't be
+        retrieved (interactive/exec'd definition, builtin, etc.).
+    ValueError
+        If args/kwargs aren't JSON-serializable.
     """
     kwargs = kwargs or {}
     _check_self_contained(func)
 
-    source = _strip_decorators(textwrap.dedent(inspect.getsource(func)))
+    source = _strip_decorators(textwrap.dedent(_get_source(func)))
 
     try:
         args_json = json.dumps(list(args))
@@ -139,6 +180,16 @@ if __name__ == "__main__":
 
     try:
         build_script(_make_closure(), args=(1,))
+        raise AssertionError("expected NotSelfContainedError")
+    except NotSelfContainedError:
+        pass
+
+    # Unreadable-source rejection -- exec-defined function has no
+    # retrievable source, same failure mode as an interactive/notebook def.
+    ns: dict[str, Any] = {}
+    exec("def exec_defined(x):\n    return x", ns)
+    try:
+        build_script(ns["exec_defined"], args=(1,))
         raise AssertionError("expected NotSelfContainedError")
     except NotSelfContainedError:
         pass

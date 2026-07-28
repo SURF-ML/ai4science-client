@@ -5,8 +5,8 @@ Every method here maps directly to one existing ai4science endpoint:
 ``results`` -> GET /results/{job_id}. No server-side behavior is assumed
 beyond what those endpoints already do.
 
-Request/response shapes live in schemas.py -- this file is HTTP
-plumbing only.
+Request/response shapes live in schemas.py; error types live in
+exceptions.py -- this file is HTTP plumbing only.
 """
 
 from __future__ import annotations
@@ -17,7 +17,13 @@ from typing import Any, Callable
 
 import requests
 
-from .schemas import JobResult, JobSubmitRequest, JobSubmitResponse
+from .exceptions import (
+    Ai4ScienceAPIError,
+    Ai4ScienceConnectionError,
+    Ai4ScienceJobFailedError,
+    Ai4ScienceTimeoutError,
+)
+from .schemas import JobResult, JobSubmitRequest, JobSubmitResponse, SlurmResourceConfig
 from .script_builder import RESULT_END, RESULT_START, build_script
 
 TERMINAL_STATUSES = ("completed", "failed")
@@ -99,6 +105,52 @@ def _new_chunk(full_text: str | None, seen_len: int) -> tuple[str, int]:
     return full_text[seen_len:], len(full_text)
 
 
+def _raise_for_response(resp: requests.Response, *, action: str) -> None:
+    """Convert a failed HTTP response into an Ai4ScienceAPIError carrying
+    the server's own `detail` message (the API returns plain
+    {"detail": "..."} on every error -- see the ai4science-poc error
+    handling), instead of letting requests.HTTPError's generic
+    "500 Server Error: ..." text be the only thing callers see.
+    """
+    if resp.ok:
+        return
+
+    detail: str | None = None
+    try:
+        body = resp.json()
+        if isinstance(body, dict):
+            detail = body.get("detail")
+    except ValueError:
+        # Response wasn't JSON -- fall back to raw text below.
+        pass
+
+    message = f"{action} failed: {detail or resp.text or resp.reason}"
+    raise Ai4ScienceAPIError(message, status_code=resp.status_code, detail=detail)
+
+
+def _request(
+    method: str, url: str, *, action: str, **kwargs: Any
+) -> requests.Response:
+    """Wrap a single requests call: network-level failures (DNS, connection
+    refused/reset, timeout) become Ai4ScienceConnectionError; HTTP error
+    responses become Ai4ScienceAPIError via _raise_for_response. A
+    successful response is returned as-is for the caller to parse.
+    """
+    try:
+        resp = requests.request(method, url, **kwargs)
+    except requests.Timeout as e:
+        raise Ai4ScienceConnectionError(
+            f"{action} timed out contacting {url}"
+        ) from e
+    except requests.ConnectionError as e:
+        raise Ai4ScienceConnectionError(
+            f"{action} could not reach {url}: {e}"
+        ) from e
+
+    _raise_for_response(resp, action=action)
+    return resp
+
+
 class Ai4ScienceJob:
     """A handle to a submitted job. Returned by ``Ai4ScienceClient.submit``."""
 
@@ -131,6 +183,13 @@ class Ai4ScienceJob:
         appears, each time we poll. This is client-side tailing -- it
         polls /logs/{job_id} and diffs against what was already shown,
         not a real server-side streaming connection.
+
+        Raises
+        ------
+        Ai4ScienceTimeoutError
+            If the job hasn't reached a terminal status within `timeout`.
+        Ai4ScienceConnectionError, Ai4ScienceAPIError
+            Propagated from the underlying /logs and /results polling.
         """
         return self._client.wait(
             self.job_id, interval=interval, timeout=timeout, stream=stream, on_log=on_log
@@ -162,6 +221,14 @@ class Ai4ScienceClient:
         Default poll interval in seconds, used by wait()/run() whenever
         a call doesn't specify its own interval. Falls back to
         AI4SCIENCE_POLL_INTERVAL (or 10 if that's also unset).
+
+    Raises
+    ------
+    ValueError
+        If base_url/user/token can't be resolved from arguments or the
+        environment. This one stays a plain ValueError rather than an
+        Ai4ScienceError, since it's a local configuration mistake, not
+        anything the API was involved in.
     """
 
     def __init__(
@@ -205,38 +272,86 @@ class Ai4ScienceClient:
         python_script: str,
         dependencies: list[str] | None = None,
         hf_token: str | None = None,
+        resources: SlurmResourceConfig | None = None,
     ) -> Ai4ScienceJob:
-        """Submit a raw script string to /ephemeral-job. Returns immediately."""
+        """Submit a raw script string to /ephemeral-job. Returns immediately.
+
+        resources : optional overrides for cpus/memory/time/partition/gpu.
+            Unset fields (or omitting this entirely) use the server's
+            defaults for ephemeral jobs -- see SlurmResourceConfig.
+
+        Raises
+        ------
+        Ai4ScienceConnectionError
+            If the ai4science API is unreachable.
+        Ai4ScienceAPIError
+            If the API rejects the submission (bad credentials, invalid
+            resource request, etc.) -- carries the server's detail message.
+        """
         request = JobSubmitRequest(
             dependencies=dependencies or [],
             python_script=python_script,
             user=self.user,
             token=self.token,
             hf_token=hf_token,
+            resources=resources,
         )
-        resp = requests.post(
+        resp = _request(
+            "POST",
             f"{self.base_url}/ephemeral-job",
+            action="Job submission",
             json=request.model_dump(exclude_none=True),
             timeout=30,
         )
-        resp.raise_for_status()
         submitted = JobSubmitResponse.model_validate(resp.json())
         return Ai4ScienceJob(self, str(submitted.job_id))
 
     def logs(self, job_id: str) -> str | None:
-        """GET /logs/{job_id}. Returns None if the log isn't available yet (404)."""
-        resp = requests.get(f"{self.base_url}/logs/{job_id}", timeout=15)
+        """GET /logs/{job_id}. Returns None if the log isn't available yet (404).
+
+        Raises
+        ------
+        Ai4ScienceConnectionError, Ai4ScienceAPIError
+            For any failure other than "not ready yet" (404).
+        """
+        try:
+            resp = requests.get(f"{self.base_url}/logs/{job_id}", timeout=15)
+        except requests.Timeout as e:
+            raise Ai4ScienceConnectionError(
+                f"Fetching logs for job {job_id} timed out"
+            ) from e
+        except requests.ConnectionError as e:
+            raise Ai4ScienceConnectionError(
+                f"Could not reach {self.base_url} to fetch logs for job {job_id}: {e}"
+            ) from e
+
         if resp.status_code == 404:
             return None
-        resp.raise_for_status()
+        _raise_for_response(resp, action=f"Fetching logs for job {job_id}")
         return resp.text
 
     def results(self, job_id: str) -> JobResult:
-        """GET /results/{job_id}. Returns a 'status: unknown' placeholder if not ready."""
-        resp = requests.get(f"{self.base_url}/results/{job_id}", timeout=15)
+        """GET /results/{job_id}. Returns a 'status: unknown' placeholder if not ready.
+
+        Raises
+        ------
+        Ai4ScienceConnectionError, Ai4ScienceAPIError
+            For any failure other than "not ready yet" (404).
+        """
+        try:
+            resp = requests.get(f"{self.base_url}/results/{job_id}", timeout=15)
+        except requests.Timeout as e:
+            raise Ai4ScienceConnectionError(
+                f"Fetching results for job {job_id} timed out"
+            ) from e
+        except requests.ConnectionError as e:
+            raise Ai4ScienceConnectionError(
+                f"Could not reach {self.base_url} to fetch results for job {job_id}: {e}"
+            ) from e
+
         if resp.status_code == 404:
             return JobResult(job_id=job_id, status="unknown")
-        resp.raise_for_status()
+        _raise_for_response(resp, action=f"Fetching results for job {job_id}")
         return JobResult.model_validate(resp.json())
 
     def wait(
@@ -256,6 +371,16 @@ class Ai4ScienceClient:
         this is client-side tailing, not a real server-sent stream. The
         raw result marker block is never shown -- once it fully
         arrives, it's replaced with one decoded, human-readable line.
+
+        Raises
+        ------
+        Ai4ScienceTimeoutError
+            If the job hasn't reached a terminal status within `timeout`.
+        Ai4ScienceConnectionError, Ai4ScienceAPIError
+            Propagated from logs()/results() -- a transient network
+            blip during polling is not swallowed or retried silently;
+            it surfaces immediately rather than waiting out the full
+            timeout on a dead connection.
         """
         interval = self.default_interval if interval is None else interval
         on_log = on_log or (lambda text: print(text, end="", flush=True))
@@ -277,7 +402,11 @@ class Ai4ScienceClient:
 
             time.sleep(interval)
             elapsed += interval
-        raise TimeoutError(f"job {job_id} did not finish within {timeout}s")
+
+        raise Ai4ScienceTimeoutError(
+            f"job {job_id} did not reach a terminal status within {timeout}s "
+            f"(last known status: {result.status if 'result' in locals() else 'unknown'})"
+        )
 
     def run(
         self,
@@ -289,6 +418,7 @@ class Ai4ScienceClient:
         timeout: int = 3600,
         stream: bool = False,
         on_log: Callable[[str], None] | None = None,
+        resources: SlurmResourceConfig | None = None,
         **kwargs: Any,
     ) -> Any:
         """Build a script from func, submit it, block until done, return the result.
@@ -298,14 +428,33 @@ class Ai4ScienceClient:
         that behaves like a normal (if slow) function call. interval
         defaults to self.default_interval when not given. Pass
         stream=True to print live log output while waiting.
+
+        resources : optional overrides for cpus/memory/time/partition/gpu
+            -- see submit().
+
+        Raises
+        ------
+        NotSelfContainedError
+            If func closes over outer variables (from build_script).
+        Ai4ScienceConnectionError, Ai4ScienceAPIError
+            If submission or polling fails.
+        Ai4ScienceTimeoutError
+            If the job doesn't finish within `timeout`.
+        Ai4ScienceJobFailedError
+            If the job finishes with a status other than 'completed'.
         """
         script = build_script(func, args=args, kwargs=kwargs)
-        job = self.submit(script, dependencies=dependencies, hf_token=hf_token)
+        job = self.submit(
+            script, dependencies=dependencies, hf_token=hf_token, resources=resources
+        )
         result = job.wait(interval=interval, timeout=timeout, stream=stream, on_log=on_log)
         if result.status != "completed":
-            raise RuntimeError(
+            raise Ai4ScienceJobFailedError(
                 f"job {job.job_id} finished with status={result.status} "
                 f"(exit_code={result.exit_code}). "
-                f"Logs: {self.base_url}/logs/{job.job_id}"
+                f"Logs: {self.base_url}/logs/{job.job_id}",
+                job_id=job.job_id,
+                status=result.status,
+                exit_code=result.exit_code,
             )
         return result.result
