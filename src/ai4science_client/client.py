@@ -2,8 +2,9 @@
 
 Every method here maps directly to one existing ai4science endpoint:
 ``submit`` -> POST /ephemeral-job, ``logs`` -> GET /logs/{job_id},
-``results`` -> GET /results/{job_id}. No server-side behavior is assumed
-beyond what those endpoints already do.
+``results`` -> GET /results/{job_id}, and (for artifacts=...)
+``_upload_artifacts`` -> POST /artifacts. No server-side behavior is
+assumed beyond what those endpoints already do.
 
 Request/response shapes live in schemas.py; error types live in
 exceptions.py -- this file is HTTP plumbing only.
@@ -22,6 +23,7 @@ from .exceptions import (
     Ai4ScienceConnectionError,
     Ai4ScienceJobFailedError,
     Ai4ScienceTimeoutError,
+    ArtifactNotFoundError,
 )
 from .schemas import JobResult, JobSubmitRequest, JobSubmitResponse, SlurmResourceConfig
 from .script_builder import RESULT_END, RESULT_START, build_script
@@ -51,7 +53,6 @@ def _display_text(raw_log: str) -> str:
     _display_text(shorter). This is what lets streaming diff the
     *display* text incrementally, the same way it diffs raw text --
     see _new_chunk. Concretely:
-
     - No (complete or partial) RESULT_START yet -> return raw_log
       unchanged.
     - RESULT_START (even just a partial trailing fragment of it)
@@ -69,16 +70,13 @@ def _display_text(raw_log: str) -> str:
         # be a partial fragment of it (e.g. mid-poll). Hide that too.
         partial_len = _trailing_partial_match_len(raw_log, RESULT_START)
         return raw_log[: len(raw_log) - partial_len]
-
     end_idx = raw_log.find(RESULT_END)
     if end_idx == -1:
         # Marker block started but hasn't fully arrived -- hide the
         # partial block rather than show incomplete base64 gibberish.
         return raw_log[:start_idx]
-
     block_end = end_idx + len(RESULT_END)
     encoded = raw_log[start_idx + len(RESULT_START) : end_idx].strip()
-
     try:
         import base64
         import json
@@ -88,7 +86,6 @@ def _display_text(raw_log: str) -> str:
     except Exception:
         # Don't hide real content behind a decoding bug -- show it raw.
         replacement = raw_log[start_idx:block_end]
-
     return raw_log[:start_idx] + replacement + raw_log[block_end:]
 
 
@@ -114,7 +111,6 @@ def _raise_for_response(resp: requests.Response, *, action: str) -> None:
     """
     if resp.ok:
         return
-
     detail: str | None = None
     try:
         body = resp.json()
@@ -123,14 +119,11 @@ def _raise_for_response(resp: requests.Response, *, action: str) -> None:
     except ValueError:
         # Response wasn't JSON -- fall back to raw text below.
         pass
-
     message = f"{action} failed: {detail or resp.text or resp.reason}"
     raise Ai4ScienceAPIError(message, status_code=resp.status_code, detail=detail)
 
 
-def _request(
-    method: str, url: str, *, action: str, **kwargs: Any
-) -> requests.Response:
+def _request(method: str, url: str, *, action: str, **kwargs: Any) -> requests.Response:
     """Wrap a single requests call: network-level failures (DNS, connection
     refused/reset, timeout) become Ai4ScienceConnectionError; HTTP error
     responses become Ai4ScienceAPIError via _raise_for_response. A
@@ -139,14 +132,9 @@ def _request(
     try:
         resp = requests.request(method, url, **kwargs)
     except requests.Timeout as e:
-        raise Ai4ScienceConnectionError(
-            f"{action} timed out contacting {url}"
-        ) from e
+        raise Ai4ScienceConnectionError(f"{action} timed out contacting {url}") from e
     except requests.ConnectionError as e:
-        raise Ai4ScienceConnectionError(
-            f"{action} could not reach {url}: {e}"
-        ) from e
-
+        raise Ai4ScienceConnectionError(f"{action} could not reach {url}: {e}") from e
     _raise_for_response(resp, action=action)
     return resp
 
@@ -249,7 +237,6 @@ class Ai4ScienceClient:
             token = token or os.environ.get("SLURM_TOKEN")
             if interval is None:
                 interval = int(os.environ.get("AI4SCIENCE_POLL_INTERVAL", "10"))
-
         missing = [
             name
             for name, value in [("base_url", base_url), ("user", user), ("token", token)]
@@ -261,11 +248,45 @@ class Ai4ScienceClient:
                 "explicitly, or set AI4SCIENCE_BASE_URL / SLURM_USER / "
                 "SLURM_TOKEN (env vars or a .env file -- see .env.example)."
             )
-
         self.base_url = base_url.rstrip("/")
         self.user = user
         self.token = token
         self.default_interval = interval
+
+    def _upload_artifacts(self, artifacts: dict[str, str]) -> dict[str, str]:
+        """Upload each local file to POST /artifacts, return
+        {name: server_assigned_key}.
+
+        The server holds the only S3 credentials in this whole flow --
+        this client never constructs an S3 client or sees a bucket name.
+        Every local path is checked to exist *before* any upload starts,
+        so a typo'd path fails fast and clearly rather than partway
+        through a batch of uploads.
+
+        Raises
+        ------
+        ArtifactNotFoundError
+            If a local path doesn't exist or isn't a readable file.
+        Ai4ScienceConnectionError, Ai4ScienceAPIError
+            If the upload itself fails.
+        """
+        for name, local_path in artifacts.items():
+            if not os.path.isfile(local_path):
+                raise ArtifactNotFoundError(name, local_path)
+
+        resolved: dict[str, str] = {}
+        for name, local_path in artifacts.items():
+            with open(local_path, "rb") as f:
+                resp = _request(
+                    "POST",
+                    f"{self.base_url}/artifacts",
+                    action=f"Artifact upload ('{name}')",
+                    params={"user": self.user},
+                    files={"file": (os.path.basename(local_path), f)},
+                    timeout=60,
+                )
+            resolved[name] = resp.json()["artifact_key"]
+        return resolved
 
     def submit(
         self,
@@ -279,6 +300,12 @@ class Ai4ScienceClient:
         resources : optional overrides for cpus/memory/time/partition/gpu.
             Unset fields (or omitting this entirely) use the server's
             defaults for ephemeral jobs -- see SlurmResourceConfig.
+
+        Note: this method's contract is unchanged by artifacts support --
+        by the time a script reaches here, any artifacts have already
+        been uploaded and baked into python_script by run()/the decorator.
+        Call build_script(..., artifacts=...) yourself first if you want
+        artifact support via this lower-level method.
 
         Raises
         ------
@@ -317,14 +344,11 @@ class Ai4ScienceClient:
         try:
             resp = requests.get(f"{self.base_url}/logs/{job_id}", timeout=15)
         except requests.Timeout as e:
-            raise Ai4ScienceConnectionError(
-                f"Fetching logs for job {job_id} timed out"
-            ) from e
+            raise Ai4ScienceConnectionError(f"Fetching logs for job {job_id} timed out") from e
         except requests.ConnectionError as e:
             raise Ai4ScienceConnectionError(
                 f"Could not reach {self.base_url} to fetch logs for job {job_id}: {e}"
             ) from e
-
         if resp.status_code == 404:
             return None
         _raise_for_response(resp, action=f"Fetching logs for job {job_id}")
@@ -348,7 +372,6 @@ class Ai4ScienceClient:
             raise Ai4ScienceConnectionError(
                 f"Could not reach {self.base_url} to fetch results for job {job_id}: {e}"
             ) from e
-
         if resp.status_code == 404:
             return JobResult(job_id=job_id, status="unknown")
         _raise_for_response(resp, action=f"Fetching results for job {job_id}")
@@ -391,18 +414,17 @@ class Ai4ScienceClient:
                 chunk, seen_len = _new_chunk(_display_text(self.logs(job_id) or ""), seen_len)
                 if chunk:
                     on_log(chunk)
-
             result = self.results(job_id)
             if result.status in TERMINAL_STATUSES:
                 if stream:
-                    chunk, seen_len = _new_chunk(_display_text(self.logs(job_id) or ""), seen_len)
+                    chunk, seen_len = _new_chunk(
+                        _display_text(self.logs(job_id) or ""), seen_len
+                    )
                     if chunk:
                         on_log(chunk)
                 return result
-
             time.sleep(interval)
             elapsed += interval
-
         raise Ai4ScienceTimeoutError(
             f"job {job_id} did not reach a terminal status within {timeout}s "
             f"(last known status: {result.status if 'result' in locals() else 'unknown'})"
@@ -413,6 +435,7 @@ class Ai4ScienceClient:
         func: Callable,
         *args: Any,
         dependencies: list[str] | None = None,
+        artifacts: dict[str, str] | None = None,
         hf_token: str | None = None,
         interval: int | None = None,
         timeout: int = 3600,
@@ -429,24 +452,41 @@ class Ai4ScienceClient:
         defaults to self.default_interval when not given. Pass
         stream=True to print live log output while waiting.
 
+        artifacts : dict[str, str] | None
+            Logical name -> local file path (a CSV, image, text file,
+            whatever the job needs). Each file is uploaded automatically
+            before submission; the wrapped function calls
+            ``get_artifact(name)`` (available as a plain global inside
+            its own body, no import needed) to get a local path to the
+            downloaded file once the job is running. You never handle
+            an S3 key, bucket, or credential yourself -- upload and
+            download are both fully automatic. `boto3` is added to
+            `dependencies` automatically when artifacts are used.
+
         resources : optional overrides for cpus/memory/time/partition/gpu
             -- see submit().
 
         Raises
         ------
+        ArtifactNotFoundError
+            If a local path in `artifacts` doesn't exist.
         NotSelfContainedError
             If func closes over outer variables (from build_script).
         Ai4ScienceConnectionError, Ai4ScienceAPIError
-            If submission or polling fails.
+            If artifact upload, submission, or polling fails.
         Ai4ScienceTimeoutError
             If the job doesn't finish within `timeout`.
         Ai4ScienceJobFailedError
             If the job finishes with a status other than 'completed'.
         """
-        script = build_script(func, args=args, kwargs=kwargs)
-        job = self.submit(
-            script, dependencies=dependencies, hf_token=hf_token, resources=resources
-        )
+        resolved_artifacts = self._upload_artifacts(artifacts) if artifacts else None
+
+        deps = list(dependencies or [])
+        if artifacts and "boto3" not in deps:
+            deps.append("boto3")
+
+        script = build_script(func, args=args, kwargs=kwargs, artifacts=resolved_artifacts)
+        job = self.submit(script, dependencies=deps, hf_token=hf_token, resources=resources)
         result = job.wait(interval=interval, timeout=timeout, stream=stream, on_log=on_log)
         if result.status != "completed":
             raise Ai4ScienceJobFailedError(

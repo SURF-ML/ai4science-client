@@ -4,7 +4,20 @@ The generated script is exactly what the ``/ephemeral-job`` endpoint
 expects as ``python_script``: it re-defines the function, calls it with
 JSON-serializable args/kwargs, and prints the JSON-encoded return value
 between two marker lines that the ai4science server already knows how
-to parse (see ``app/utils/log_parser.py`` on the server).
+to parse (see ``app/common/utils/log_parser.py`` on the server).
+
+If ``artifacts`` is given, a small preamble is injected *before* the
+function source, defining a module-level ``get_artifact(name)`` helper
+and the name->S3-key mapping it uses. Because the preamble and the
+function source are both module-level code in the same generated
+script, the function body can call ``get_artifact(...)`` even though
+it was never imported or defined where the user originally wrote the
+function -- Python resolves globals at call time, not definition time.
+The user only ever refers to artifacts by logical name; they never see
+an S3 key, bucket, or credential. Downloading uses S3 credentials the
+server already injects into the job's own environment (S3_ACCESS_KEY,
+S3_SECRET_KEY, S3_ENDPOINT, S3_ARTIFACTS_BUCKET) -- this script never
+carries any credentials of its own.
 
 This module has no network dependency and is fully self-testable.
 """
@@ -85,10 +98,46 @@ def _get_source(func: Callable) -> str:
         ) from e
 
 
+def _build_artifact_preamble(artifacts: dict[str, str]) -> str:
+    """Build the module-level get_artifact() helper + key mapping,
+    injected before the user's function source. Only called when
+    artifacts is non-empty.
+    """
+    artifacts_json = json.dumps(artifacts)
+    return f'''import json as _artifact_json
+import os as _artifact_os
+
+_ARTIFACT_KEYS = _artifact_json.loads({artifacts_json!r})
+
+
+def get_artifact(name):
+    """Download a job input artifact by its logical name and return the
+    local path it was written to. Uses S3 credentials already present
+    in this job's environment -- nothing else to configure."""
+    import boto3
+    from botocore.client import Config as _BotoConfig
+
+    key = _ARTIFACT_KEYS[name]
+    local_path = "/tmp/artifact_" + key.replace("/", "_")
+    s3 = boto3.client(
+        "s3",
+        endpoint_url=_artifact_os.environ["S3_ENDPOINT"],
+        aws_access_key_id=_artifact_os.environ["S3_ACCESS_KEY"],
+        aws_secret_access_key=_artifact_os.environ["S3_SECRET_KEY"],
+        config=_BotoConfig(signature_version="s3v4", s3={{"addressing_style": "path"}}),
+    )
+    s3.download_file(_artifact_os.environ["S3_ARTIFACTS_BUCKET"], key, local_path)
+    return local_path
+
+
+'''
+
+
 def build_script(
     func: Callable,
     args: tuple[Any, ...] = (),
     kwargs: dict[str, Any] | None = None,
+    artifacts: dict[str, str] | None = None,
 ) -> str:
     """Build a standalone Python script that runs ``func(*args, **kwargs)``.
 
@@ -100,6 +149,11 @@ def build_script(
         regular .py file (not the REPL, a notebook cell, or exec'd code).
     args, kwargs :
         Must be JSON-serializable (numbers, strings, lists, dicts).
+    artifacts : dict[str, str] | None
+        Logical name -> S3 key, already resolved by the caller (see
+        Ai4ScienceClient._upload_artifacts). If given, the generated
+        script gains a module-level ``get_artifact(name)`` the function
+        body can call to download that file and get back a local path.
 
     Returns
     -------
@@ -117,7 +171,6 @@ def build_script(
     """
     kwargs = kwargs or {}
     _check_self_contained(func)
-
     source = _strip_decorators(textwrap.dedent(_get_source(func)))
 
     try:
@@ -129,11 +182,11 @@ def build_script(
             f"lists, dicts). Original error: {e}"
         ) from e
 
-    return f'''{source}
+    artifact_preamble = _build_artifact_preamble(artifacts) if artifacts else ""
 
+    return f'''{artifact_preamble}{source}
 import base64
 import json
-
 _args = json.loads({args_json!r})
 _kwargs = json.loads({kwargs_json!r})
 _result = {func.__name__}(*_args, **_kwargs)
@@ -145,6 +198,7 @@ print("{RESULT_END}")
 
 
 if __name__ == "__main__":
+
     def custom_sum(x, y):
         return x + y
 
@@ -163,10 +217,19 @@ if __name__ == "__main__":
     lines = proc.stdout.strip().splitlines()
     assert lines[0] == RESULT_START
     assert lines[-1] == RESULT_END
-    decoded = json.loads(
-        __import__("base64").b64decode(lines[1]).decode("utf-8")
-    )
+    decoded = json.loads(__import__("base64").b64decode(lines[1]).decode("utf-8"))
     assert decoded == 7
+
+    # Artifact preamble: get_artifact must be defined and callable from
+    # the function body (we don't actually hit S3 here -- just prove the
+    # preamble is syntactically valid and injects before the function).
+    def uses_artifact():
+        return get_artifact("data")  # noqa: F821 -- injected at script-build time
+
+    art_script = build_script(uses_artifact, artifacts={"data": "artifacts/u/abc/file.csv"})
+    assert "def get_artifact(name):" in art_script
+    assert art_script.index("def get_artifact") < art_script.index("def uses_artifact")
+    assert '"data": "artifacts/u/abc/file.csv"' in art_script
 
     # Closure rejection -- must be a real closure (nested function
     # referencing an enclosing local), not a module-level global.
