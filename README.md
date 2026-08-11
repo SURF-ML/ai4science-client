@@ -1,9 +1,7 @@
 # ai4science-client
 
 A thin Python client for running functions on Snellius through the
-[Surf-AI4Science](https://github.com/SURF-ML) API. Point it at a running
-k8s deployment, and it submits your function, waits for it to
-finish on the cluster, and hands you back the return value.
+[Surf-AI4Science](https://github.com/SURF-ML) API. The client uses existing hippocampus infrastructure to submit jobs to slurm.
 
 No SLURM. No object storage. No container config. One API, two calling
 styles.
@@ -18,9 +16,7 @@ ai4cience-client/
 ├── examples/
 ├── pyproject.toml
 └── README.md
-## Running HPC jobs via ai4science-client
-
-### Install
+## Install
 
 Add to `pyproject.toml`:
 
@@ -34,6 +30,8 @@ dependencies = [
 ```bash
 uv pip install -e .
 ```
+
+## Running HPC jobs via ai4science-client
 
 ### Example
 
@@ -59,7 +57,9 @@ def custom_sum_decorated(x, y):
 print(custom_sum_decorated(1, 2))
 ```
 
-`client.run(...)` and `@job(...)` submit the function to Snellius, block until it finishes, and return the result — same job, two calling styles. `stream=True` prints live log output while it runs.
+`client.run(...)` and `@job(...)` submit the function to Snellius, block
+until it finishes, and return the result — same job, two calling
+styles. `stream=True` prints live log output while it runs.
 
 ### Run it
 
@@ -141,6 +141,50 @@ result = train_step(3, 4)
 `submit()` accepts the same `resources=` argument if you're using the
 async/manual submission style below.
 
+### Artifacts
+
+Need your function to work with a local file -- a CSV, an image, a text
+file, anything? Pass `artifacts=` mapping a logical name to a local
+path. The file is uploaded automatically before the job runs; inside
+your function, call `get_artifact(name)` to get a local path to it on
+Snellius. You never touch S3, a key, or a bucket -- upload and download
+are both fully automatic:
+
+```python
+from ai4science_client import Ai4ScienceClient
+
+client = Ai4ScienceClient()
+
+def read_csv_artifact() -> dict:
+    with open(get_artifact("data")) as f:  # available automatically, no import needed
+        lines = f.read().splitlines()
+    return {"line_count": len(lines), "first_line": lines[0]}
+
+result = client.run(
+    read_csv_artifact,
+    artifacts={"data": "./my_local_data.csv"},
+)
+```
+
+Works identically with the decorator:
+
+```python
+from ai4science_client import job
+
+@job(
+    base_url="https://ai4science.dev.sdp.surf.nl",
+    user="your_snellius_user",
+    token=your_slurm_token,
+    artifacts={"data": "./my_local_data.csv"},
+)
+def read_csv_artifact() -> dict:
+    with open(get_artifact("data")) as f:
+        lines = f.read().splitlines()
+    return {"line_count": len(lines), "first_line": lines[0]}
+
+result = read_csv_artifact()
+```
+
 ### Streaming
 
 Pass `stream=True` to see log output printed live while the call blocks
@@ -177,9 +221,12 @@ result = job_handle.wait()           # block until done, when ready
 - **`examples/run_bench_hf.py`** -- a GPU benchmark (`torch`, matrix
   multiply timing, real device info), a HuggingFace sentiment-analysis
   pipeline (both declared via `dependencies=[...]` with `stream=True` so
-  you can watch the install and run live), and a small resource-scoped
-  job demonstrating explicit `resources=SlurmResourceConfig(...)`.
-  Verified against a real H100 node on Snellius.
+  you can watch the install and run live), a small resource-scoped job
+  demonstrating explicit `resources=SlurmResourceConfig(...)`, a
+  filesystem test that writes/reads a CSV under `$HOME`, and an
+  artifact test that uploads a local CSV via `artifacts=...` and reads
+  it back inside the job. Verified against a real H100 node on
+  Snellius.
 
 ```bash
 uv run python examples/run_bench_hf.py
