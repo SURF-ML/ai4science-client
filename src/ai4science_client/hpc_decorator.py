@@ -21,6 +21,7 @@ def job(
     user: str,
     token: str,
     dependencies: list[str] | None = None,
+    artifacts: dict[str, str] | None = None,
     hf_token: str | None = None,
     interval: int = 10,
     timeout: int = 3600,
@@ -34,6 +35,13 @@ def job(
     variables; imports inside the function body) and its arguments/return
     value must be JSON-serializable.
 
+    artifacts : dict[str, str] | None
+        Logical name -> local file path. Uploaded automatically before
+        each call; the wrapped function can call ``get_artifact(name)``
+        (a plain global inside its body) to get a local path once
+        running remotely. See Ai4ScienceClient.run for the full
+        explanation -- this decorator just forwards the parameter.
+
     Set stream=True to print live log output while the call blocks
     (client-side tailing -- see Ai4ScienceClient.wait).
 
@@ -45,9 +53,10 @@ def job(
     the decorator is applied (fail fast) -- a bad value raises ValueError
     at import/decoration time, not when the wrapped function is called.
     Once the wrapped function *is* called, any failure (unreachable API,
-    rejected submission, timeout, job failure) raises the corresponding
-    exception from ai4science_client.exceptions -- see Ai4ScienceClient.run
-    for the full list. This decorator doesn't catch or rewrap any of them.
+    rejected submission, timeout, job failure, missing artifact file)
+    raises the corresponding exception from ai4science_client.exceptions
+    -- see Ai4ScienceClient.run for the full list. This decorator doesn't
+    catch or rewrap any of them.
 
     Example
     -------
@@ -68,6 +77,7 @@ def job(
                 func,
                 *args,
                 dependencies=dependencies,
+                artifacts=artifacts,
                 hf_token=hf_token,
                 interval=interval,
                 timeout=timeout,

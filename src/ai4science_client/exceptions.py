@@ -54,3 +54,24 @@ class Ai4ScienceJobFailedError(Ai4ScienceError):
         self.job_id = job_id
         self.status = status
         self.exit_code = exit_code
+
+
+class ArtifactNotFoundError(Ai4ScienceError):
+    """A local file path passed via artifacts=... does not exist (or
+    isn't a readable file) on this machine.
+
+    Raised entirely client-side, before any HTTP request is made -- this
+    is a local usage mistake (bad path, typo, wrong cwd), not something
+    the ai4science API was ever asked about, so it's caught and reported
+    clearly up front rather than surfacing as a confusing failure deep
+    inside job submission.
+    """
+
+    def __init__(self, name: str, local_path: str):
+        super().__init__(
+            f"Artifact '{name}': local file not found at '{local_path}'. "
+            "Check the path is correct, exists, and is readable before "
+            "calling run() / submit() / the decorator."
+        )
+        self.name = name
+        self.local_path = local_path
