@@ -453,15 +453,17 @@ class Ai4ScienceClient:
         stream=True to print live log output while waiting.
 
         artifacts : dict[str, str] | None
-            Logical name -> local file path (a CSV, image, text file,
-            whatever the job needs). Each file is uploaded automatically
-            before submission; the wrapped function calls
-            ``get_artifact(name)`` (available as a plain global inside
-            its own body, no import needed) to get a local path to the
-            downloaded file once the job is running. You never handle
-            an S3 key, bucket, or credential yourself -- upload and
-            download are both fully automatic. `boto3` is added to
-            `dependencies` automatically when artifacts are used.
+            Maps a parameter name on `func` to a local file path (a
+            CSV, image, text file, whatever the job needs). Each file
+            is uploaded automatically before submission; the matching
+            parameter on `func` receives the downloaded file's local
+            path once the job is running -- no special import or
+            function call needed in the wrapped function, it's just an
+            ordinary argument. You never handle an S3 key, bucket, or
+            credential yourself -- upload and download are both fully
+            automatic. `boto3` is added to `dependencies` automatically
+            when artifacts are used. See build_script's docstring for
+            the exact binding mechanism.
 
         resources : optional overrides for cpus/memory/time/partition/gpu
             -- see submit().

@@ -144,25 +144,25 @@ async/manual submission style below.
 ### Artifacts
 
 Need your function to work with a local file -- a CSV, an image, a text
-file, anything? Pass `artifacts=` mapping a logical name to a local
-path. The file is uploaded automatically before the job runs; inside
-your function, call `get_artifact(name)` to get a local path to it on
-Snellius. You never touch S3, a key, or a bucket -- upload and download
-are both fully automatic:
+file, anything? Pass `artifacts=` mapping a parameter name on your
+function to a local path. The file is uploaded automatically before
+the job runs; your function just receives the downloaded file's local
+path as that parameter -- no special import, no function call, nothing
+extra to learn:
 
 ```python
 from ai4science_client import Ai4ScienceClient
 
 client = Ai4ScienceClient()
 
-def read_csv_artifact() -> dict:
-    with open(get_artifact("data")) as f:  # available automatically, no import needed
+def read_csv_artifact(data_path) -> dict:
+    with open(data_path) as f:
         lines = f.read().splitlines()
     return {"line_count": len(lines), "first_line": lines[0]}
 
 result = client.run(
     read_csv_artifact,
-    artifacts={"data": "./my_local_data.csv"},
+    artifacts={"data_path": "./my_local_data.csv"},
 )
 ```
 
@@ -175,15 +175,20 @@ from ai4science_client import job
     base_url="https://ai4science.dev.sdp.surf.nl",
     user="your_snellius_user",
     token=your_slurm_token,
-    artifacts={"data": "./my_local_data.csv"},
+    artifacts={"data_path": "./my_local_data.csv"},
 )
-def read_csv_artifact() -> dict:
-    with open(get_artifact("data")) as f:
+def read_csv_artifact(data_path) -> dict:
+    with open(data_path) as f:
         lines = f.read().splitlines()
     return {"line_count": len(lines), "first_line": lines[0]}
 
 result = read_csv_artifact()
 ```
+
+Note the artifact dict key (`"data_path"` here) must match the
+parameter name exactly -- that's how the downloaded file gets bound to
+the right argument. Don't also pass that same name positionally or via
+another keyword.
 
 ### Streaming
 
