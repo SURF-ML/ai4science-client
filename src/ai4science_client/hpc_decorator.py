@@ -36,10 +36,11 @@ def job(
     value must be JSON-serializable.
 
     artifacts : dict[str, str] | None
-        Logical name -> local file path. Uploaded automatically before
-        each call; the wrapped function can call ``get_artifact(name)``
-        (a plain global inside its body) to get a local path once
-        running remotely. See Ai4ScienceClient.run for the full
+        Maps a parameter name on the wrapped function to a local file
+        path. Uploaded automatically before each call; the matching
+        parameter receives the downloaded file's local path once
+        running remotely -- no special import or function call needed.
+        See Ai4ScienceClient.run / build_script for the full
         explanation -- this decorator just forwards the parameter.
 
     Set stream=True to print live log output while the call blocks

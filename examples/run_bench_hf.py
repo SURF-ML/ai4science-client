@@ -34,15 +34,15 @@ from ai4science_client import Ai4ScienceClient
 from ai4science_client.schemas import SlurmResourceConfig
 
 
-def read_csv_artifact() -> dict:
+def read_csv_artifact(data_path: str) -> dict:
     """Read a local CSV that was uploaded as a job artifact and report
     basic stats about it -- demonstrates artifacts=... in client.run():
-    the file never touches this function's arguments, the client
-    uploads it automatically before submission, and get_artifact("data")
-    (a plain global injected into the job script, no import needed)
-    downloads it and returns a local path once the job is running.
+    the file never touches this function's arguments *at call time* on
+    your machine, only remotely -- the client uploads it automatically
+    before submission, and data_path arrives already downloaded and
+    ready to open once the job is running on Snellius.
     """
-    with open(get_artifact("data")) as f:  # noqa: F821 -- injected at job-build time
+    with open(data_path) as f:
         lines = f.read().splitlines()
     return {
         "line_count": len(lines),
@@ -237,7 +237,7 @@ def main() -> int:
     print("\n--- Artifact test (local CSV uploaded, read back inside the job) ---")
     artifact_result = client.run(
         read_csv_artifact,
-        artifacts={"data": "/tmp/test_artifact.csv"},
+        artifacts={"data_path": "/tmp/test_artifact.csv"},
         stream=True,
         timeout=300,
     )

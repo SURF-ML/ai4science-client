@@ -6,18 +6,15 @@ JSON-serializable args/kwargs, and prints the JSON-encoded return value
 between two marker lines that the ai4science server already knows how
 to parse (see ``app/common/utils/log_parser.py`` on the server).
 
-If ``artifacts`` is given, a small preamble is injected *before* the
-function source, defining a module-level ``get_artifact(name)`` helper
-and the name->S3-key mapping it uses. Because the preamble and the
-function source are both module-level code in the same generated
-script, the function body can call ``get_artifact(...)`` even though
-it was never imported or defined where the user originally wrote the
-function -- Python resolves globals at call time, not definition time.
-The user only ever refers to artifacts by logical name; they never see
-an S3 key, bucket, or credential. Downloading uses S3 credentials the
-server already injects into the job's own environment (S3_ACCESS_KEY,
-S3_SECRET_KEY, S3_ENDPOINT, S3_ARTIFACTS_BUCKET) -- this script never
-carries any credentials of its own.
+If ``artifacts`` is given, the generated script downloads each file
+from S3 *before* calling the function, and passes each one in as a
+plain keyword argument -- see build_script's docstring for the exact
+contract. The user's function never imports anything artifact-related
+or calls anything special; it just receives a local path like any
+other argument. Downloading uses S3 credentials the server already
+injects into the job's own environment (S3_ACCESS_KEY, S3_SECRET_KEY,
+S3_ENDPOINT, S3_ARTIFACTS_BUCKET) -- this script never carries any
+credentials of its own.
 
 This module has no network dependency and is fully self-testable.
 """
@@ -98,38 +95,34 @@ def _get_source(func: Callable) -> str:
         ) from e
 
 
-def _build_artifact_preamble(artifacts: dict[str, str]) -> str:
-    """Build the module-level get_artifact() helper + key mapping,
-    injected before the user's function source. Only called when
-    artifacts is non-empty.
+def _build_artifact_download_block(artifacts: dict[str, str]) -> str:
+    """Build the glue code that downloads each artifact and binds it
+    into _kwargs under its name, run just before the function call.
+    Only called when artifacts is non-empty.
     """
     artifacts_json = json.dumps(artifacts)
-    return f'''import json as _artifact_json
-import os as _artifact_os
-
-_ARTIFACT_KEYS = _artifact_json.loads({artifacts_json!r})
-
-
-def get_artifact(name):
-    """Download a job input artifact by its logical name and return the
-    local path it was written to. Uses S3 credentials already present
-    in this job's environment -- nothing else to configure."""
+    return f'''
+_artifact_keys = json.loads({artifacts_json!r})
+if _artifact_keys:
     import boto3
     from botocore.client import Config as _BotoConfig
 
-    key = _ARTIFACT_KEYS[name]
-    local_path = "/tmp/artifact_" + key.replace("/", "_")
-    s3 = boto3.client(
+    _s3 = boto3.client(
         "s3",
-        endpoint_url=_artifact_os.environ["S3_ENDPOINT"],
-        aws_access_key_id=_artifact_os.environ["S3_ACCESS_KEY"],
-        aws_secret_access_key=_artifact_os.environ["S3_SECRET_KEY"],
+        endpoint_url=os.environ["S3_ENDPOINT"],
+        aws_access_key_id=os.environ["S3_ACCESS_KEY"],
+        aws_secret_access_key=os.environ["S3_SECRET_KEY"],
         config=_BotoConfig(signature_version="s3v4", s3={{"addressing_style": "path"}}),
     )
-    s3.download_file(_artifact_os.environ["S3_ARTIFACTS_BUCKET"], key, local_path)
-    return local_path
-
-
+    for _artifact_name, _artifact_key in _artifact_keys.items():
+        if _artifact_name in _kwargs:
+            raise ValueError(
+                f"artifact name '{{_artifact_name}}' collides with an "
+                "explicitly passed keyword argument of the same name"
+            )
+        _local_path = "/tmp/artifact_" + _artifact_key.replace("/", "_")
+        _s3.download_file(os.environ["S3_ARTIFACTS_BUCKET"], _artifact_key, _local_path)
+        _kwargs[_artifact_name] = _local_path
 '''
 
 
@@ -150,10 +143,28 @@ def build_script(
     args, kwargs :
         Must be JSON-serializable (numbers, strings, lists, dicts).
     artifacts : dict[str, str] | None
-        Logical name -> S3 key, already resolved by the caller (see
-        Ai4ScienceClient._upload_artifacts). If given, the generated
-        script gains a module-level ``get_artifact(name)`` the function
-        body can call to download that file and get back a local path.
+        Maps a parameter name on ``func`` to an S3 key (already
+        resolved by the caller -- see Ai4ScienceClient._upload_artifacts,
+        which uploads each local file and hands back its key before
+        build_script is ever called). For each entry, the generated
+        script downloads that file from S3 *before* calling ``func``,
+        and passes the local path it was written to as a keyword
+        argument under that name -- so ``func`` just needs an ordinary
+        parameter with that name, e.g.::
+
+            def read_csv(data_path):
+                with open(data_path) as f:
+                    ...
+
+            build_script(read_csv, artifacts={"data_path": "artifacts/u/abc/data.csv"})
+
+        There's no special import, no injected global, nothing the
+        function needs to know about beyond receiving a path string
+        like any other argument. An artifact name that collides with
+        an explicitly passed keyword argument raises ValueError inside
+        the generated script (caught as a job failure, not silently
+        overwritten) -- avoid passing the same name via ``kwargs`` and
+        ``artifacts``.
 
     Returns
     -------
@@ -182,13 +193,15 @@ def build_script(
             f"lists, dicts). Original error: {e}"
         ) from e
 
-    artifact_preamble = _build_artifact_preamble(artifacts) if artifacts else ""
+    artifact_block = _build_artifact_download_block(artifacts) if artifacts else ""
 
-    return f'''{artifact_preamble}{source}
+    return f'''{source}
 import base64
 import json
+import os
 _args = json.loads({args_json!r})
 _kwargs = json.loads({kwargs_json!r})
+{artifact_block}
 _result = {func.__name__}(*_args, **_kwargs)
 _encoded = base64.b64encode(json.dumps(_result).encode("utf-8")).decode("utf-8")
 print("{RESULT_START}")
@@ -220,16 +233,21 @@ if __name__ == "__main__":
     decoded = json.loads(__import__("base64").b64decode(lines[1]).decode("utf-8"))
     assert decoded == 7
 
-    # Artifact preamble: get_artifact must be defined and callable from
-    # the function body (we don't actually hit S3 here -- just prove the
-    # preamble is syntactically valid and injects before the function).
-    def uses_artifact():
-        return get_artifact("data")  # noqa: F821 -- injected at script-build time
+    # Artifact binding: the artifact name becomes a plain kwarg -- no
+    # global, no special import in the user's function. We don't hit S3
+    # here, just confirm the generated script's shape is correct.
+    def uses_artifact(data_path):
+        return data_path
 
-    art_script = build_script(uses_artifact, artifacts={"data": "artifacts/u/abc/file.csv"})
-    assert "def get_artifact(name):" in art_script
-    assert art_script.index("def get_artifact") < art_script.index("def uses_artifact")
-    assert '"data": "artifacts/u/abc/file.csv"' in art_script
+    art_script = build_script(
+        uses_artifact, artifacts={"data_path": "artifacts/u/abc/file.csv"}
+    )
+    assert "def uses_artifact(data_path):" in art_script
+    assert '"data_path": "artifacts/u/abc/file.csv"' in art_script
+    assert "get_artifact" not in art_script  # old mechanism fully gone
+    assert art_script.index("_artifact_keys = json.loads") < art_script.index(
+        "_result = uses_artifact"
+    )
 
     # Closure rejection -- must be a real closure (nested function
     # referencing an enclosing local), not a module-level global.
