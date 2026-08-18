@@ -28,6 +28,8 @@ def job(
     stream: bool = False,
     on_log: Callable[[str], None] | None = None,
     resources: SlurmResourceConfig | None = None,
+    tier: str | None = None,
+    cluster: str | None = None,
 ):
     """Decorator that runs the wrapped function on Snellius via ai4science.
 
@@ -49,6 +51,15 @@ def job(
     resources : optional overrides for cpus/memory/time/partition/gpu --
         see Ai4ScienceClient.submit. Unset fields use the server's
         defaults for ephemeral jobs.
+
+    tier, cluster : optional auto-tier-routing controls. tier="auto"
+        (or a real tier id) estimates resource needs from
+        dependencies/the wrapped function's source and routes to the
+        smallest-fitting cluster; cluster pins a specific one directly.
+        Both default to None -- omitting them runs on the server's
+        single configured SLURM cluster, unchanged from before this
+        existed. See Ai4ScienceClient.run for the full explanation --
+        this decorator just forwards the parameters.
 
     Note on errors: base_url/user/token are validated immediately, when
     the decorator is applied (fail fast) -- a bad value raises ValueError
@@ -85,6 +96,8 @@ def job(
                 stream=stream,
                 on_log=on_log,
                 resources=resources,
+                tier=tier,
+                cluster=cluster,
                 **kwargs,
             )
 

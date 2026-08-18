@@ -294,12 +294,21 @@ class Ai4ScienceClient:
         dependencies: list[str] | None = None,
         hf_token: str | None = None,
         resources: SlurmResourceConfig | None = None,
+        tier: str | None = None,
+        cluster: str | None = None,
     ) -> Ai4ScienceJob:
         """Submit a raw script string to /ephemeral-job. Returns immediately.
 
         resources : optional overrides for cpus/memory/time/partition/gpu.
             Unset fields (or omitting this entirely) use the server's
             defaults for ephemeral jobs -- see SlurmResourceConfig.
+
+        tier, cluster : optional auto-tier-routing controls. tier="auto"
+            (or a real tier id) estimates resource needs from
+            dependencies/python_script and routes to the smallest-fitting
+            cluster; cluster pins a specific one directly. Both default
+            to None -- omitting them submits to the server's single
+            configured SLURM cluster, unchanged from before this existed.
 
         Note: this method's contract is unchanged by artifacts support --
         by the time a script reaches here, any artifacts have already
@@ -322,6 +331,8 @@ class Ai4ScienceClient:
             token=self.token,
             hf_token=hf_token,
             resources=resources,
+            tier=tier,
+            cluster=cluster,
         )
         resp = _request(
             "POST",
@@ -442,6 +453,8 @@ class Ai4ScienceClient:
         stream: bool = False,
         on_log: Callable[[str], None] | None = None,
         resources: SlurmResourceConfig | None = None,
+        tier: str | None = None,
+        cluster: str | None = None,
         **kwargs: Any,
     ) -> Any:
         """Build a script from func, submit it, block until done, return the result.
@@ -488,7 +501,14 @@ class Ai4ScienceClient:
             deps.append("boto3")
 
         script = build_script(func, args=args, kwargs=kwargs, artifacts=resolved_artifacts)
-        job = self.submit(script, dependencies=deps, hf_token=hf_token, resources=resources)
+        job = self.submit(
+            script,
+            dependencies=deps,
+            hf_token=hf_token,
+            resources=resources,
+            tier=tier,
+            cluster=cluster,
+        )
         result = job.wait(interval=interval, timeout=timeout, stream=stream, on_log=on_log)
         if result.status != "completed":
             raise Ai4ScienceJobFailedError(

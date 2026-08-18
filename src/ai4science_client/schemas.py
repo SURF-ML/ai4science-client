@@ -39,7 +39,15 @@ class SlurmResourceConfig(BaseModel):
 
 
 class JobSubmitRequest(BaseModel):
-    """Body sent to POST /ephemeral-job."""
+    """Body sent to POST /ephemeral-job.
+
+    tier/cluster opt into auto-tier-routing: "auto" (or a real tier id)
+    estimates resource needs from dependencies/python_script and routes
+    to the smallest-fitting cluster; cluster pins a specific one
+    directly. Both default to None -- omitting them preserves the
+    server's original behavior (submit to its single configured SLURM
+    cluster), unchanged.
+    """
 
     dependencies: list[str] = Field(default_factory=list)
     python_script: str
@@ -47,6 +55,8 @@ class JobSubmitRequest(BaseModel):
     token: str
     hf_token: str | None = None
     resources: SlurmResourceConfig | None = None
+    tier: str | None = None
+    cluster: str | None = None
 
 
 class JobSubmitResponse(BaseModel):
