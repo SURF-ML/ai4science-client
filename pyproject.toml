@@ -27,3 +27,8 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
+
+[dependency-groups]
+dev = [
+    "jupyterlab>=4.6.3",
+]
