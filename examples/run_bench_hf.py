@@ -176,68 +176,84 @@ def csv_training_job(n_samples: int = 2000, n_features: int = 5) -> dict:
         "true_coefs": [round(float(c), 4) for c in true_coefs],
     }
 
+def resource_and_artifact_check(data_path: str) -> dict:
+    """Combines resources= and artifacts= in one call: explicit
+    resource overrides via SlurmResourceConfig, and a local file
+    uploaded automatically before submission and read back inside the
+    job via a plain function argument -- no get_artifact() call, no
+    import needed.
+    """
+    import os
+
+    with open(data_path) as f:
+        lines = f.read().splitlines()
+    return {
+        "partition": os.environ.get("SLURM_JOB_PARTITION"),
+        "line_count": len(lines),
+        "first_line": lines[0] if lines else None,
+    }
 
 def main() -> int:
 
     client = Ai4ScienceClient()
 
-    # print("\n--- GPU benchmark (dependencies=['torch'], stream=True) ---")
-    # bench = client.run(
-    #     gpu_benchmark,
-    #     4096,
-    #     dependencies=["torch"],
-    #     stream=True,
-    #     timeout=1800,
-    # )
-    # print(f"\n{bench}")
-    #
-    # print("\n--- HuggingFace sentiment analysis (dependencies=['torch', 'transformers']) ---")
-    # sentiment = client.run(
-    #     huggingface_sentiment,
-    #     ["Snellius makes this so easy.", "I really dislike waiting for pip installs."],
-    #     dependencies=["torch", "transformers"],
-    #     stream=True,
-    #     timeout=1800,
-    # )
-    # print(f"\n{sentiment}")
-    #
-    # print("\n--- Resource check (explicit cpus/memory/time/partition via resources=) ---")
-    # resources = SlurmResourceConfig(
-    #     partition="genoa",
-    #     cpus_per_task=4,
-    #     memory_mb=8000,
-    #     time_limit_minutes=15,
-    #     tres_per_node="",
-    # )
-    # check = client.run(
-    #     resource_check,
-    #     resources=resources,
-    #     timeout=600,
-    # )
-    # print(f"\n{check}")
-    #
-    # print("\n--- CSV filesystem test (write to $HOME, read back, train) ---")
-    # csv_result = client.run(
-    #     csv_training_job,
-    #     n_samples=2000,
-    #     n_features=5,
-    #     dependencies=["pandas", "scikit-learn"],
-    #     resources=SlurmResourceConfig(
-    #         partition="genoa",
-    #         cpus_per_task=4,
-    #         memory_mb=8000,
-    #         time_limit_minutes=15,
-    #         tres_per_node="",
-    #     ),
-    #     stream=True,
-    #     timeout=600,
-    # )
-    # print(f"\n{csv_result}")
+    print("\n--- GPU benchmark (dependencies=['torch'], stream=True) ---")
+    bench = client.run(
+        gpu_benchmark,
+        4096,
+        dependencies=["torch"],
+        stream=True,
+        timeout=1800,
+    )
+    print(f"\n{bench}")
+
+    print("\n--- HuggingFace sentiment analysis (dependencies=['torch', 'transformers']) ---")
+    sentiment = client.run(
+        huggingface_sentiment,
+        ["Snellius makes this so easy.", "I really dislike waiting for pip installs."],
+        dependencies=["torch", "transformers"],
+        stream=True,
+        timeout=1800,
+    )
+    print(f"\n{sentiment}")
+
+    print("\n--- Resource check (explicit cpus/memory/time/partition via resources=) ---")
+    resources = SlurmResourceConfig(
+        partition="genoa",
+        cpus_per_task=4,
+        memory_mb=8000,
+        time_limit_minutes=15,
+        tres_per_node="",
+    )
+    check = client.run(
+        resource_check,
+        resources=resources,
+        timeout=600,
+    )
+    print(f"\n{check}")
+
+    print("\n--- CSV filesystem test (write to $HOME, read back, train) ---")
+    csv_result = client.run(
+        csv_training_job,
+        n_samples=2000,
+        n_features=5,
+        dependencies=["pandas", "scikit-learn"],
+        resources=SlurmResourceConfig(
+            partition="genoa",
+            cpus_per_task=4,
+            memory_mb=8000,
+            time_limit_minutes=15,
+            tres_per_node="",
+        ),
+        stream=True,
+        timeout=600,
+    )
+    print(f"\n{csv_result}")
 
     print("\n--- Artifact test (local CSV uploaded, read back inside the job) ---")
     artifact_result = client.run(
         read_csv_artifact,
-        artifacts={"data_path": "/tmp/test_artifact.csv"},
+        artifacts={"data_path": "sample_texts.txt"},
         stream=True,
         timeout=300,
     )
@@ -247,6 +263,21 @@ def main() -> int:
         "\nPASS: GPU benchmark, HuggingFace pipeline, resource-scoped job, "
         "CSV filesystem test, and artifact upload/download all ran via ai4science."
     )
+
+    print("\n--- Resource + artifact check (resources= and artifacts= together) ---")
+    check_with_artifact = client.run(
+        resource_and_artifact_check,
+        artifacts={"data_path": "sample_texts.txt"},
+        resources=SlurmResourceConfig(
+            partition="genoa",
+            cpus_per_task=4,
+            memory_mb=8000,
+            time_limit_minutes=15,
+            tres_per_node="",
+        ),
+        timeout=600,
+    )
+    print(f"\n{check_with_artifact}")
     return 0
 
 
