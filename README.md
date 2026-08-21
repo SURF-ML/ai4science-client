@@ -6,6 +6,13 @@ A thin Python client for running functions on Snellius through the
 No SLURM. No object storage. No container config. One API, two calling
 styles.
 
+> **Want the full tour?** [`examples/demo_notebook.ipynb`](examples/demo_notebook.ipynb)
+> walks through every feature below in one runnable notebook -- dataset
+> provisioning, OpenML/HF jobs, artifacts, and automatic tier routing.
+
+> **Full API reference:** the underlying FastAPI service's interactive
+> docs are at [ai4science.dev.sdp.surf.nl/docs](https://ai4science.dev.sdp.surf.nl/docs).
+
 ## Structure
 
 ai4cience-client/
@@ -222,6 +229,13 @@ result = job_handle.wait()           # block until done, when ready
 ```
 
 ## Examples
+
+- **[`examples/demo_notebook.ipynb`](examples/demo_notebook.ipynb)** --
+  an interactive, cell-by-cell tour of the API: dataset provisioning,
+  running a job via OpenML, an EESSI module-based job, Hugging Face
+  with explicit resources and a local artifact, and automatic tier
+  routing across compute clusters. The best starting point if you want
+  to see everything in action before writing your own code.
 
 - **`examples/run_bench_hf.py`** -- a GPU benchmark (`torch`, matrix
   multiply timing, real device info), a HuggingFace sentiment-analysis
