@@ -1,10 +1,11 @@
 """Thin HTTP client for the ai4science API.
 
 Every method here maps directly to one existing ai4science endpoint:
-``submit`` -> POST /ephemeral-job, ``logs`` -> GET /logs/{job_id},
-``results`` -> GET /results/{job_id}, and (for artifacts=...)
-``_upload_artifacts`` -> POST /artifacts. No server-side behavior is
-assumed beyond what those endpoints already do.
+``submit`` -> POST /ephemeral-job or POST /ray-job (selected via
+``container=``), ``logs`` -> GET /logs/{job_id}, ``results`` ->
+GET /results/{job_id}, and (for artifacts=...) ``_upload_artifacts`` ->
+POST /artifacts. No server-side behavior is assumed beyond what those
+endpoints already do.
 
 Request/response shapes live in schemas.py; error types live in
 exceptions.py -- this file is HTTP plumbing only.
@@ -14,7 +15,7 @@ from __future__ import annotations
 
 import os
 import time
-from typing import Any, Callable
+from typing import Any, Callable, Literal
 
 import requests
 
@@ -25,10 +26,23 @@ from .exceptions import (
     Ai4ScienceTimeoutError,
     ArtifactNotFoundError,
 )
-from .schemas import JobResult, JobSubmitRequest, JobSubmitResponse, SlurmResourceConfig
+from .schemas import (
+    JobResult,
+    JobSubmitRequest,
+    JobSubmitResponse,
+    RayJobSubmitRequest,
+    SlurmResourceConfig,
+)
 from .script_builder import RESULT_END, RESULT_START, build_script
 
 TERMINAL_STATUSES = ("completed", "failed")
+
+Container = Literal["ephemeral", "ray"]
+
+_ENDPOINT_BY_CONTAINER: dict[Container, str] = {
+    "ephemeral": "/ephemeral-job",
+    "ray": "/ray-job",
+}
 
 
 def _trailing_partial_match_len(text: str, needle: str) -> int:
@@ -140,7 +154,13 @@ def _request(method: str, url: str, *, action: str, **kwargs: Any) -> requests.R
 
 
 class Ai4ScienceJob:
-    """A handle to a submitted job. Returned by ``Ai4ScienceClient.submit``."""
+    """A handle to a submitted job. Returned by ``Ai4ScienceClient.submit``.
+
+    Deliberately platform-agnostic: /logs/{job_id} and /results/{job_id}
+    are shared routes that don't distinguish ephemeral from Ray jobs, so
+    the same handle type works for both regardless of which container=
+    a job was submitted with.
+    """
 
     def __init__(self, client: "Ai4ScienceClient", job_id: str):
         self.job_id = job_id
@@ -263,6 +283,11 @@ class Ai4ScienceClient:
         so a typo'd path fails fast and clearly rather than partway
         through a batch of uploads.
 
+        Independent of container= -- artifact upload is purely
+        client-side and doesn't depend on which endpoint the script
+        eventually runs against; the server injects the same S3
+        credentials into a Ray job's environment as an ephemeral one.
+
         Raises
         ------
         ArtifactNotFoundError
@@ -296,19 +321,33 @@ class Ai4ScienceClient:
         resources: SlurmResourceConfig | None = None,
         tier: str | None = None,
         cluster: str | None = None,
+        container: Container = "ephemeral",
     ) -> Ai4ScienceJob:
-        """Submit a raw script string to /ephemeral-job. Returns immediately.
+        """Submit a raw script string. Returns immediately.
 
-        resources : optional overrides for cpus/memory/time/partition/gpu.
-            Unset fields (or omitting this entirely) use the server's
-            defaults for ephemeral jobs -- see SlurmResourceConfig.
+        container : "ephemeral" (default) or "ray"
+            "ephemeral" posts to /ephemeral-job and runs python_script
+            as a single process. "ray" posts to /ray-job: the server
+            bootstraps a live, multi-node Ray cluster first, then runs
+            python_script as the driver against it -- your script can
+            call ray.init(address="auto") directly, no need to start
+            Ray itself. For "ray", resources.nodes controls cluster
+            size (head + nodes-1 workers); the rest of `resources`
+            describes what's requested on EACH node, not totals.
 
-        tier, cluster : optional auto-tier-routing controls. tier="auto"
-            (or a real tier id) estimates resource needs from
-            dependencies/python_script and routes to the smallest-fitting
-            cluster; cluster pins a specific one directly. Both default
-            to None -- omitting them submits to the server's single
-            configured SLURM cluster, unchanged from before this existed.
+        resources : optional overrides for cpus/memory/time/partition/gpu
+            (per-node, when container="ray"). Unset fields (or omitting
+            this entirely) use the server's defaults for that job type.
+
+        tier, cluster : optional auto-tier-routing controls, ephemeral
+            only. tier="auto" (or a real tier id) estimates resource
+            needs from dependencies/python_script and routes to the
+            smallest-fitting cluster; cluster pins a specific one
+            directly. Both default to None -- omitting them submits to
+            the server's single configured SLURM cluster, unchanged
+            from before this existed. Passing either with
+            container="ray" raises ValueError: auto-tier-routing isn't
+            wired up server-side for /ray-job.
 
         Note: this method's contract is unchanged by artifacts support --
         by the time a script reaches here, any artifacts have already
@@ -318,26 +357,46 @@ class Ai4ScienceClient:
 
         Raises
         ------
+        ValueError
+            If tier or cluster is given with container="ray".
         Ai4ScienceConnectionError
             If the ai4science API is unreachable.
         Ai4ScienceAPIError
             If the API rejects the submission (bad credentials, invalid
             resource request, etc.) -- carries the server's detail message.
         """
-        request = JobSubmitRequest(
-            dependencies=dependencies or [],
-            python_script=python_script,
-            user=self.user,
-            token=self.token,
-            hf_token=hf_token,
-            resources=resources,
-            tier=tier,
-            cluster=cluster,
-        )
+        if container == "ray":
+            if tier is not None or cluster is not None:
+                raise ValueError(
+                    "tier/cluster are not supported with container='ray' -- "
+                    "auto-tier-routing is only wired up server-side for "
+                    "/ephemeral-job. Omit both, or use container='ephemeral'."
+                )
+            request: JobSubmitRequest | RayJobSubmitRequest = RayJobSubmitRequest(
+                dependencies=dependencies or [],
+                python_script=python_script,
+                user=self.user,
+                token=self.token,
+                hf_token=hf_token,
+                resources=resources,
+            )
+        else:
+            request = JobSubmitRequest(
+                dependencies=dependencies or [],
+                python_script=python_script,
+                user=self.user,
+                token=self.token,
+                hf_token=hf_token,
+                resources=resources,
+                tier=tier,
+                cluster=cluster,
+            )
+
+        endpoint = _ENDPOINT_BY_CONTAINER[container]
         resp = _request(
             "POST",
-            f"{self.base_url}/ephemeral-job",
-            action="Job submission",
+            f"{self.base_url}{endpoint}",
+            action="Job submission" if container == "ephemeral" else "Ray job submission",
             json=request.model_dump(exclude_none=True),
             timeout=30,
         )
@@ -346,6 +405,9 @@ class Ai4ScienceClient:
 
     def logs(self, job_id: str) -> str | None:
         """GET /logs/{job_id}. Returns None if the log isn't available yet (404).
+
+        Shared across container types -- this route doesn't distinguish
+        job type.
 
         Raises
         ------
@@ -367,6 +429,9 @@ class Ai4ScienceClient:
 
     def results(self, job_id: str) -> JobResult:
         """GET /results/{job_id}. Returns a 'status: unknown' placeholder if not ready.
+
+        Shared across container types -- this route doesn't distinguish
+        job type.
 
         Raises
         ------
@@ -405,6 +470,9 @@ class Ai4ScienceClient:
         this is client-side tailing, not a real server-sent stream. The
         raw result marker block is never shown -- once it fully
         arrives, it's replaced with one decoded, human-readable line.
+
+        Shared across container types -- this route doesn't distinguish
+        job type.
 
         Raises
         ------
@@ -455,6 +523,7 @@ class Ai4ScienceClient:
         resources: SlurmResourceConfig | None = None,
         tier: str | None = None,
         cluster: str | None = None,
+        container: Container = "ephemeral",
         **kwargs: Any,
     ) -> Any:
         """Build a script from func, submit it, block until done, return the result.
@@ -464,6 +533,13 @@ class Ai4ScienceClient:
         that behaves like a normal (if slow) function call. interval
         defaults to self.default_interval when not given. Pass
         stream=True to print live log output while waiting.
+
+        container : "ephemeral" (default) or "ray" -- see submit()'s
+            docstring for the full explanation. With container="ray",
+            func can call ray.init(address="auto") directly; the
+            cluster is already up by the time it runs. resources.nodes
+            then controls cluster size, and the rest of `resources`
+            applies per node.
 
         artifacts : dict[str, str] | None
             Maps a parameter name on `func` to a local file path (a
@@ -476,13 +552,16 @@ class Ai4ScienceClient:
             credential yourself -- upload and download are both fully
             automatic. `boto3` is added to `dependencies` automatically
             when artifacts are used. See build_script's docstring for
-            the exact binding mechanism.
+            the exact binding mechanism. Works identically regardless
+            of container=.
 
         resources : optional overrides for cpus/memory/time/partition/gpu
             -- see submit().
 
         Raises
         ------
+        ValueError
+            If tier or cluster is given with container="ray".
         ArtifactNotFoundError
             If a local path in `artifacts` doesn't exist.
         NotSelfContainedError
@@ -508,6 +587,7 @@ class Ai4ScienceClient:
             resources=resources,
             tier=tier,
             cluster=cluster,
+            container=container,
         )
         result = job.wait(interval=interval, timeout=timeout, stream=stream, on_log=on_log)
         if result.status != "completed":
