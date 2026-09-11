@@ -12,7 +12,7 @@ from __future__ import annotations
 import functools
 from typing import Callable
 
-from .client import Ai4ScienceClient
+from .client import Ai4ScienceClient, Container
 from .schemas import SlurmResourceConfig
 
 
@@ -30,12 +30,23 @@ def job(
     resources: SlurmResourceConfig | None = None,
     tier: str | None = None,
     cluster: str | None = None,
+    container: Container = "ephemeral",
 ):
     """Decorator that runs the wrapped function on Snellius via ai4science.
 
     The wrapped function must be self-contained (no closures over outer
     variables; imports inside the function body) and its arguments/return
     value must be JSON-serializable.
+
+    container : "ephemeral" (default) or "ray"
+        "ephemeral" runs the function as a single process. "ray" runs
+        it against a live, multi-node Ray cluster the server
+        bootstraps first -- the function can call
+        ray.init(address="auto") directly. With container="ray",
+        resources.nodes controls cluster size (head + nodes-1
+        workers); the rest of `resources` describes what's requested
+        on EACH node. See Ai4ScienceClient.submit for the full
+        explanation.
 
     artifacts : dict[str, str] | None
         Maps a parameter name on the wrapped function to a local file
@@ -44,22 +55,25 @@ def job(
         running remotely -- no special import or function call needed.
         See Ai4ScienceClient.run / build_script for the full
         explanation -- this decorator just forwards the parameter.
+        Works identically regardless of container=.
 
     Set stream=True to print live log output while the call blocks
     (client-side tailing -- see Ai4ScienceClient.wait).
 
     resources : optional overrides for cpus/memory/time/partition/gpu --
         see Ai4ScienceClient.submit. Unset fields use the server's
-        defaults for ephemeral jobs.
+        defaults for that job type.
 
-    tier, cluster : optional auto-tier-routing controls. tier="auto"
-        (or a real tier id) estimates resource needs from
-        dependencies/the wrapped function's source and routes to the
-        smallest-fitting cluster; cluster pins a specific one directly.
-        Both default to None -- omitting them runs on the server's
-        single configured SLURM cluster, unchanged from before this
-        existed. See Ai4ScienceClient.run for the full explanation --
-        this decorator just forwards the parameters.
+    tier, cluster : optional auto-tier-routing controls, ephemeral
+        only -- ValueError at call time if combined with
+        container="ray". tier="auto" (or a real tier id) estimates
+        resource needs from dependencies/the wrapped function's source
+        and routes to the smallest-fitting cluster; cluster pins a
+        specific one directly. Both default to None -- omitting them
+        runs on the server's single configured SLURM cluster,
+        unchanged from before this existed. See Ai4ScienceClient.run
+        for the full explanation -- this decorator just forwards the
+        parameters.
 
     Note on errors: base_url/user/token are validated immediately, when
     the decorator is applied (fail fast) -- a bad value raises ValueError
@@ -79,6 +93,16 @@ def job(
     ...     return x + y
     >>> custom_sum(3, 4)   # blocks, runs remotely, returns 7
     7
+
+    >>> @job(base_url="https://ai4science.dev.sdp.surf.nl",
+    ...      user="juliusa", token=slurm_token, container="ray",
+    ...      resources=SlurmResourceConfig(nodes=4, cpus_per_task=16))
+    ... def train_distributed():
+    ...     import ray
+    ...     ray.init(address="auto")
+    ...     return {"nodes": len(ray.nodes())}
+    >>> train_distributed()   # blocks, runs on a 4-node Ray cluster
+    {'nodes': 4}
     """
     client = Ai4ScienceClient(base_url=base_url, user=user, token=token)
 
@@ -98,6 +122,7 @@ def job(
                 resources=resources,
                 tier=tier,
                 cluster=cluster,
+                container=container,
                 **kwargs,
             )
 

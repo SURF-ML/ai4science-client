@@ -1,8 +1,8 @@
-"""Pydantic models for the three data shapes that cross the ai4science
-HTTP boundary: the submit request, the submit response, and the results
-response. Keeping these separate from client.py means the request/response
-contract can be read, imported, or reused (e.g. for type hints elsewhere)
-without pulling in requests or any HTTP logic.
+"""Pydantic models for the data shapes that cross the ai4science HTTP
+boundary: submit requests (ephemeral and ray), the submit response, and
+the results response. Keeping these separate from client.py means the
+request/response contract can be read, imported, or reused (e.g. for
+type hints elsewhere) without pulling in requests or any HTTP logic.
 """
 
 from __future__ import annotations
@@ -19,6 +19,11 @@ class SlurmResourceConfig(BaseModel):
     is a plain duplicate, not a shared import, since this is a separate
     package. Any field left as None means "use the server's default for
     this job type."
+
+    For multi-node jobs (container="ray"), `nodes` controls cluster
+    size and the other fields describe resources requested PER NODE --
+    no separate multi-node config needed, this same model already
+    expresses it, matching the server's own design.
     """
 
     partition: str | None = None
@@ -59,8 +64,28 @@ class JobSubmitRequest(BaseModel):
     cluster: str | None = None
 
 
+class RayJobSubmitRequest(BaseModel):
+    """Body sent to POST /ray-job.
+
+    Same dependencies+python_script shape as JobSubmitRequest -- the
+    driver script runs against a live, multi-node Ray cluster instead
+    of a single process. No tier/cluster here: auto-tier-routing is
+    only wired up server-side for /ephemeral-job. Node count and
+    per-node resources are controlled entirely through `resources`
+    (SlurmResourceConfig.nodes/cpus_per_task/memory_mb/tres_per_node).
+    """
+
+    dependencies: list[str] = Field(default_factory=list)
+    python_script: str
+    user: str
+    token: str
+    hf_token: str | None = None
+    resources: SlurmResourceConfig | None = None
+
+
 class JobSubmitResponse(BaseModel):
-    """Response from POST /ephemeral-job.
+    """Response from POST /ephemeral-job or POST /ray-job -- both
+    return the same SlurmJobResult shape server-side.
 
     The server returns job_id as an int here (it comes straight from
     SlurmJobResult.job_id: int). /results/{job_id}, by contrast, returns
