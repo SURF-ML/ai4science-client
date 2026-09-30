@@ -31,6 +31,8 @@ def job(
     tier: str | None = None,
     cluster: str | None = None,
     container: Container = "ephemeral",
+    track: bool = False,
+    experiment_name: str | None = None,
 ):
     """Decorator that runs the wrapped function on Snellius via ai4science.
 
@@ -75,6 +77,13 @@ def job(
         for the full explanation -- this decorator just forwards the
         parameters.
 
+    track, experiment_name : optional MLflow experiment tracking.
+        track=False (default) is a no-op. Set track=True to have the
+        server start an MLflow run for each call, tagged by that
+        call's job_id; experiment_name picks which MLflow experiment
+        it lands in. See Ai4ScienceClient.submit for the full
+        explanation -- this decorator just forwards the parameters.
+
     Note on errors: base_url/user/token are validated immediately, when
     the decorator is applied (fail fast) -- a bad value raises ValueError
     at import/decoration time, not when the wrapped function is called.
@@ -103,6 +112,14 @@ def job(
     ...     return {"nodes": len(ray.nodes())}
     >>> train_distributed()   # blocks, runs on a 4-node Ray cluster
     {'nodes': 4}
+
+    >>> @job(base_url="https://ai4science.dev.sdp.surf.nl",
+    ...      user="juliusa", token=slurm_token,
+    ...      track=True, experiment_name="my-project")
+    ... def train_step(lr):
+    ...     return {"loss": 0.1}
+    >>> train_step(0.01)   # blocks, runs remotely, tracked in MLflow
+    {'loss': 0.1}
     """
     client = Ai4ScienceClient(base_url=base_url, user=user, token=token)
 
@@ -123,6 +140,8 @@ def job(
                 tier=tier,
                 cluster=cluster,
                 container=container,
+                track=track,
+                experiment_name=experiment_name,
                 **kwargs,
             )
 

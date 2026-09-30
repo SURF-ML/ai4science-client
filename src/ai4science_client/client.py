@@ -322,6 +322,8 @@ class Ai4ScienceClient:
         tier: str | None = None,
         cluster: str | None = None,
         container: Container = "ephemeral",
+        track: bool = False,
+        experiment_name: str | None = None,
     ) -> Ai4ScienceJob:
         """Submit a raw script string. Returns immediately.
 
@@ -348,6 +350,17 @@ class Ai4ScienceClient:
             from before this existed. Passing either with
             container="ray" raises ValueError: auto-tier-routing isn't
             wired up server-side for /ray-job.
+
+        track, experiment_name : optional MLflow experiment tracking.
+            track=False (default) is a no-op. Set track=True to have
+            the server start an MLflow run for this job, tagged by its
+            job_id; experiment_name picks which MLflow experiment it
+            lands in (server picks a fallback name if omitted). Works
+            with both container="ephemeral" and container="ray". This
+            is intentionally minimal for now -- nothing here yet reads
+            the run back (no run URL, no metrics helpers on the
+            returned Ai4ScienceJob); that's a natural follow-up once
+            there's a public MLflow UI route to point people at.
 
         Note: this method's contract is unchanged by artifacts support --
         by the time a script reaches here, any artifacts have already
@@ -379,6 +392,8 @@ class Ai4ScienceClient:
                 token=self.token,
                 hf_token=hf_token,
                 resources=resources,
+                track=track,
+                experiment_name=experiment_name,
             )
         else:
             request = JobSubmitRequest(
@@ -390,6 +405,8 @@ class Ai4ScienceClient:
                 resources=resources,
                 tier=tier,
                 cluster=cluster,
+                track=track,
+                experiment_name=experiment_name,
             )
 
         endpoint = _ENDPOINT_BY_CONTAINER[container]
@@ -524,6 +541,8 @@ class Ai4ScienceClient:
         tier: str | None = None,
         cluster: str | None = None,
         container: Container = "ephemeral",
+        track: bool = False,
+        experiment_name: str | None = None,
         **kwargs: Any,
     ) -> Any:
         """Build a script from func, submit it, block until done, return the result.
@@ -558,6 +577,9 @@ class Ai4ScienceClient:
         resources : optional overrides for cpus/memory/time/partition/gpu
             -- see submit().
 
+        track, experiment_name : optional MLflow experiment tracking --
+            see submit(). track=False (default) is a no-op.
+
         Raises
         ------
         ValueError
@@ -588,6 +610,8 @@ class Ai4ScienceClient:
             tier=tier,
             cluster=cluster,
             container=container,
+            track=track,
+            experiment_name=experiment_name,
         )
         result = job.wait(interval=interval, timeout=timeout, stream=stream, on_log=on_log)
         if result.status != "completed":

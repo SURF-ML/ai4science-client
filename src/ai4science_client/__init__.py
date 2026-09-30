@@ -8,13 +8,17 @@ from .exceptions import (
     Ai4ScienceError,
     Ai4ScienceJobFailedError,
     Ai4ScienceTimeoutError,
+    Ai4ScienceToolError,
     ArtifactNotFoundError,
 )
 from .hpc_decorator import job
+from .mcp_client import Ai4ScienceMCPClient
 from .schemas import (
+    CommunityTool,
     JobResult,
     JobSubmitRequest,
     JobSubmitResponse,
+    McpTool,
     RayJobSubmitRequest,
     SlurmResourceConfig,
 )
@@ -28,12 +32,16 @@ __all__ = [
     "Ai4ScienceError",
     "Ai4ScienceJob",
     "Ai4ScienceJobFailedError",
+    "Ai4ScienceMCPClient",
     "Ai4ScienceTimeoutError",
+    "Ai4ScienceToolError",
     "ArtifactNotFoundError",
+    "CommunityTool",
     "Container",
     "JobResult",
     "JobSubmitRequest",
     "JobSubmitResponse",
+    "McpTool",
     "NotSelfContainedError",
     "RayJobSubmitRequest",
     "SlurmResourceConfig",

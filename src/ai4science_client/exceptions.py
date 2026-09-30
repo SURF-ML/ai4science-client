@@ -75,3 +75,14 @@ class ArtifactNotFoundError(Ai4ScienceError):
         )
         self.name = name
         self.local_path = local_path
+
+
+class Ai4ScienceToolError(Ai4ScienceError):
+    """An MCP tool call reached the server but the tool reported an error
+    (e.g. unknown cluster, community archive unavailable). The message is
+    the server's own explanation, written to be actionable.
+    """
+
+    def __init__(self, message: str, tool_name: str):
+        super().__init__(message)
+        self.tool_name = tool_name
