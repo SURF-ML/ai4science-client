@@ -19,6 +19,13 @@ explicitly opting out of the GPU that some job types request by default.
 See the "Slurm resources" section of the README for the full set of
 overridable fields.
 
+`tracked_resource_check` demonstrates track=True -- opt-in MLflow
+experiment tracking. Deliberately minimal right now: the server starts
+a run tagged by job_id and logs dispatch-time params (resources,
+dependencies) automatically, but there's no way to log a metric from
+inside the job yet. Uses submit()+wait() rather than run(), since
+run() discards job_id -- needed here to look the run up afterward.
+
 Usage
 -----
 Copy .env.example to .env and fill in real values, then:
@@ -30,7 +37,9 @@ from __future__ import annotations
 
 import sys
 
-from ai4science_client import Ai4ScienceClient
+import requests
+
+from ai4science_client import Ai4ScienceClient, build_script
 from ai4science_client.schemas import SlurmResourceConfig
 
 
@@ -107,6 +116,19 @@ def resource_check() -> dict:
         "visible_cpus": multiprocessing.cpu_count(),
         "slurm_cpus_per_task": os.environ.get("SLURM_CPUS_PER_TASK"),
         "slurm_mem_per_node": os.environ.get("SLURM_MEM_PER_NODE"),
+        "slurm_job_partition": os.environ.get("SLURM_JOB_PARTITION"),
+    }
+
+
+def tracked_resource_check() -> dict:
+    """Same trivial job as resource_check, used here to demonstrate
+    track=True instead -- see the module docstring for what tracking
+    does and doesn't do yet at this stage.
+    """
+    import os
+
+    return {
+        "hostname": os.uname().nodename,
         "slurm_job_partition": os.environ.get("SLURM_JOB_PARTITION"),
     }
 
@@ -232,6 +254,35 @@ def main() -> int:
     )
     print(f"\n{check}")
 
+    print("\n--- MLflow tracking demo (track=True, experiment_name=...) ---")
+    print("Note: tracking is minimal right now -- dispatch-time params and")
+    print("terminal status only, no in-job metric logging yet. Using")
+    print("submit()+wait() instead of run() so we can see job_id.")
+    tracked_script = build_script(tracked_resource_check)
+    tracked_job = client.submit(
+        tracked_script,
+        resources=SlurmResourceConfig(
+            partition="genoa",
+            cpus_per_task=2,
+            memory_mb=4000,
+            time_limit_minutes=10,
+            tres_per_node="",
+        ),
+        track=True,
+        experiment_name="run_bench_hf-demo",
+    )
+    tracked_result = tracked_job.wait(stream=True, timeout=600)
+    print(f"\n{tracked_result}")
+    # Confirm tracking actually happened -- raw API call, since the
+    # client doesn't wrap GET /api/v1/mlflow/{job_id}/run yet (same
+    # "not wrapped yet, call it directly" pattern used for /eessi-job
+    # elsewhere in this repo).
+    run_info_resp = requests.get(f"{client.base_url}/api/v1/mlflow/{tracked_job.job_id}/run")
+    if run_info_resp.ok:
+        print("MLflow run:", run_info_resp.json())
+    else:
+        print(f"Could not fetch MLflow run info: {run_info_resp.status_code} {run_info_resp.text}")
+
     print("\n--- CSV filesystem test (write to $HOME, read back, train) ---")
     csv_result = client.run(
         csv_training_job,
@@ -261,7 +312,7 @@ def main() -> int:
 
     print(
         "\nPASS: GPU benchmark, HuggingFace pipeline, resource-scoped job, "
-        "CSV filesystem test, and artifact upload/download all ran via ai4science."
+        "tracked job, CSV filesystem test, and artifact upload/download all ran via ai4science."
     )
 
     print("\n--- Resource + artifact check (resources= and artifacts= together) ---")
