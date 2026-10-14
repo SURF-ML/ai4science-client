@@ -174,6 +174,11 @@ class Ai4ScienceJob:
         """Return the current parsed status/result (may still be 'running')."""
         return self._client.results(self.job_id)
 
+    def tracking_run(self) -> dict[str, Any]:
+        """The MLflow run of this job (submitted with track=True). See
+        Ai4ScienceClient.tracking_run."""
+        return self._client.tracking_run(self.job_id)
+
     def wait(
         self,
         interval: int | None = None,
@@ -202,6 +207,8 @@ class Ai4ScienceJob:
         return self._client.wait(
             self.job_id, interval=interval, timeout=timeout, stream=stream, on_log=on_log
         )
+
+
 
     def __repr__(self) -> str:
         return f"Ai4ScienceJob(job_id={self.job_id!r})"
@@ -624,3 +631,27 @@ class Ai4ScienceClient:
                 exit_code=result.exit_code,
             )
         return result.result
+
+
+
+    def tracking_run(self, job_id: str) -> dict[str, Any]:
+        """GET /api/v1/mlflow/{job_id}/run: the MLflow run of a job that was
+        submitted with track=True -- its status, params, metrics, tags and
+        UI link.
+
+        Raises
+        ------
+        Ai4ScienceAPIError
+            With the server's explanation: 404 if the job has no run
+            (not submitted with track=True, or MLflow was unreachable at
+            submission), 503 if the tracking server is unreachable now.
+        Ai4ScienceConnectionError
+            If the API itself can't be reached.
+        """
+        resp = _request(
+            "GET",
+            f"{self.base_url}/api/v1/mlflow/{job_id}/run",
+            action=f"Fetching the MLflow run for job {job_id}",
+            timeout=30,
+        )
+        return resp.json()
