@@ -1,0 +1,22 @@
+# Local checks that run before every commit.
+# Uses the same secret-scan rules as CI (.gitleaks.toml).
+#
+# Setup (once per clone):
+#   uvx pre-commit install
+# Check the whole repo manually:
+#   uvx pre-commit run --all-files
+repos:
+  # Blocks commits that contain secrets.
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.28.0
+    hooks:
+      - id: gitleaks
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: detect-private-key        # SSH / TLS private keys
+      - id: check-added-large-files   # stops accidental datasets / model weights
+        args: ["--maxkb=1024"]
+      - id: check-yaml
+      - id: check-toml

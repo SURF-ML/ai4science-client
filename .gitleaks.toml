@@ -1,0 +1,31 @@
+# gitleaks configuration: built-in rules plus project-specific ones.
+# Docs: https://github.com/gitleaks/gitleaks#configuration
+
+title = "ai4science-client gitleaks config"
+
+[extend]
+useDefault = true
+
+# Slurm / AI4Science tokens assigned in code or notebooks
+# (catches non-JWT formats the default `jwt` rule would miss).
+[[rules]]
+id = "ai4science-slurm-token"
+description = "Hardcoded SLURM / AI4Science token"
+regex = '''(?i)(?:SLURM_TOKEN|AI4SCIENCE_TOKEN|SLURM_JWT)\\?["']?\s*[=:,]\s*\\?["']([^"'\s\\]{20,})'''
+secretGroup = 1
+entropy = 3.5
+keywords = ["slurm_token", "ai4science_token", "slurm_jwt"]
+
+[[allowlists]]
+description = "Placeholders, templates and lockfiles"
+paths = [
+  '''(^|/)\.env\.example$''',
+  '''(^|/)uv\.lock$''',
+  '''(^|/)\.?venv/''',
+  '''(^|/)(node_modules|__pycache__|\.pytest_cache|\.ruff_cache)/''',
+]
+regexes = [
+  '''^\.\.\.$''',
+  '''(?i)^your_''',
+  '''^REDACTED''',
+]
