@@ -7,14 +7,14 @@ between two marker lines that the ai4science server already knows how
 to parse (see ``app/common/utils/log_parser.py`` on the server).
 
 If ``artifacts`` is given, the generated script downloads each file
-from S3 *before* calling the function, and passes each one in as a
-plain keyword argument -- see build_script's docstring for the exact
+*before* calling the function, and passes each one in as a plain
+keyword argument -- see build_script's docstring for the exact
 contract. The user's function never imports anything artifact-related
 or calls anything special; it just receives a local path like any
-other argument. Downloading uses S3 credentials the server already
-injects into the job's own environment (S3_ACCESS_KEY, S3_SECRET_KEY,
-S3_ENDPOINT, S3_ARTIFACTS_BUCKET) -- this script never carries any
-credentials of its own.
+other argument. Each artifact is downloaded through the presigned URL
+the server returned for it (plain urllib, no S3 keys). Only for an
+older server that returns just a key does the script fall back to boto3
+with the S3 credentials the server injects into the job's environment.
 
 This module has no network dependency and is fully self-testable.
 """
@@ -95,33 +95,60 @@ def _get_source(func: Callable) -> str:
         ) from e
 
 
+def is_download_url(ref: str) -> bool:
+    """True if an artifact reference is a presigned download URL (current
+    servers), False if it is a bare S3 key (older servers)."""
+    return ref.startswith(("https://", "http://"))
+
+
 def _build_artifact_download_block(artifacts: dict[str, str]) -> str:
     """Build the glue code that downloads each artifact and binds it
     into _kwargs under its name, run just before the function call.
     Only called when artifacts is non-empty.
+
+    Each value is a presigned download URL (downloaded with urllib, no
+    credentials) or, from an older server, a bare S3 key (downloaded
+    with boto3 and the S3 keys in the job environment). The local path
+    is /tmp/artifact_<key with "/" as "_"> either way. The URL is never
+    printed: its query string is what grants access.
     """
     artifacts_json = json.dumps(artifacts)
     return f'''
 _artifact_keys = json.loads({artifacts_json!r})
 if _artifact_keys:
-    import boto3
-    from botocore.client import Config as _BotoConfig
+    import shutil as _shutil
+    import urllib.parse as _urlparse
+    import urllib.request as _urlrequest
 
-    _s3 = boto3.client(
-        "s3",
-        endpoint_url=os.environ["S3_ENDPOINT"],
-        aws_access_key_id=os.environ["S3_ACCESS_KEY"],
-        aws_secret_access_key=os.environ["S3_SECRET_KEY"],
-        config=_BotoConfig(signature_version="s3v4", s3={{"addressing_style": "path"}}),
-    )
-    for _artifact_name, _artifact_key in _artifact_keys.items():
+    _s3 = None
+    for _artifact_name, _artifact_ref in _artifact_keys.items():
         if _artifact_name in _kwargs:
             raise ValueError(
                 f"artifact name '{{_artifact_name}}' collides with an "
                 "explicitly passed keyword argument of the same name"
             )
-        _local_path = "/tmp/artifact_" + _artifact_key.replace("/", "_")
-        _s3.download_file(os.environ["S3_ARTIFACTS_BUCKET"], _artifact_key, _local_path)
+        if _artifact_ref.startswith(("https://", "http://")):
+            # Path is /<bucket>/<key>: keep only the key for the local name.
+            _artifact_path = _urlparse.urlsplit(_artifact_ref).path
+            _artifact_key = _urlparse.unquote(_artifact_path).split("/", 2)[-1]
+            _local_path = "/tmp/artifact_" + _artifact_key.replace("/", "_")
+            with _urlrequest.urlopen(_artifact_ref, timeout=300) as _resp:
+                with open(_local_path, "wb") as _out:
+                    _shutil.copyfileobj(_resp, _out)
+        else:
+            if _s3 is None:
+                import boto3
+                from botocore.client import Config as _BotoConfig
+
+                _s3 = boto3.client(
+                    "s3",
+                    endpoint_url=os.environ["S3_ENDPOINT"],
+                    aws_access_key_id=os.environ["S3_ACCESS_KEY"],
+                    aws_secret_access_key=os.environ["S3_SECRET_KEY"],
+                    config=_BotoConfig(signature_version="s3v4", s3={{"addressing_style": "path"}}),
+                )
+            _local_path = "/tmp/artifact_" + _artifact_ref.replace("/", "_")
+            _s3.download_file(os.environ["S3_ARTIFACTS_BUCKET"], _artifact_ref, _local_path)
         _kwargs[_artifact_name] = _local_path
 '''
 
@@ -143,11 +170,12 @@ def build_script(
     args, kwargs :
         Must be JSON-serializable (numbers, strings, lists, dicts).
     artifacts : dict[str, str] | None
-        Maps a parameter name on ``func`` to an S3 key (already
-        resolved by the caller -- see Ai4ScienceClient._upload_artifacts,
-        which uploads each local file and hands back its key before
-        build_script is ever called). For each entry, the generated
-        script downloads that file from S3 *before* calling ``func``,
+        Maps a parameter name on ``func`` to a presigned download URL or,
+        for older servers, an S3 key (already resolved by the caller --
+        see Ai4ScienceClient._upload_artifacts, which uploads each local
+        file and hands back its URL/key before build_script is ever
+        called). For each entry, the generated script downloads that
+        file *before* calling ``func``,
         and passes the local path it was written to as a keyword
         argument under that name -- so ``func`` just needs an ordinary
         parameter with that name, e.g.::

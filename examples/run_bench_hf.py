@@ -37,8 +37,6 @@ from __future__ import annotations
 
 import sys
 
-import requests
-
 from ai4science_client import Ai4ScienceClient, build_script
 from ai4science_client.schemas import SlurmResourceConfig
 
@@ -273,15 +271,12 @@ def main() -> int:
     )
     tracked_result = tracked_job.wait(stream=True, timeout=600)
     print(f"\n{tracked_result}")
-    # Confirm tracking actually happened -- raw API call, since the
-    # client doesn't wrap GET /api/v1/mlflow/{job_id}/run yet (same
-    # "not wrapped yet, call it directly" pattern used for /eessi-job
-    # elsewhere in this repo).
-    run_info_resp = requests.get(f"{client.base_url}/api/v1/mlflow/{tracked_job.job_id}/run")
-    if run_info_resp.ok:
-        print("MLflow run:", run_info_resp.json())
-    else:
-        print(f"Could not fetch MLflow run info: {run_info_resp.status_code} {run_info_resp.text}")
+    # Confirm tracking actually happened. tracking_run() sends the Slurm
+    # credentials the server uses to check the job is yours.
+    try:
+        print("MLflow run:", tracked_job.tracking_run())
+    except Exception as e:  # demo script: report and carry on
+        print(f"Could not fetch MLflow run info: {e}")
 
     print("\n--- CSV filesystem test (write to $HOME, read back, train) ---")
     csv_result = client.run(

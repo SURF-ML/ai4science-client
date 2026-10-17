@@ -33,7 +33,7 @@ from .schemas import (
     RayJobSubmitRequest,
     SlurmResourceConfig,
 )
-from .script_builder import RESULT_END, RESULT_START, build_script
+from .script_builder import RESULT_END, RESULT_START, build_script, is_download_url
 
 TERMINAL_STATUSES = ("completed", "failed")
 
@@ -280,9 +280,16 @@ class Ai4ScienceClient:
         self.token = token
         self.default_interval = interval
 
+    def _read_headers(self) -> dict[str, str]:
+        """Slurm credentials sent on every job read (/logs, /results, the
+        MLflow run). The server uses them to check that the job belongs to
+        this user -- the same credentials as submission, no extra API key."""
+        return {"X-Slurm-User": self.user, "X-Slurm-Token": self.token}
+
     def _upload_artifacts(self, artifacts: dict[str, str]) -> dict[str, str]:
         """Upload each local file to POST /artifacts, return
-        {name: server_assigned_key}.
+        {name: presigned download URL}, or {name: S3 key} for an older
+        server that returns no URL.
 
         The server holds the only S3 credentials in this whole flow --
         this client never constructs an S3 client or sees a bucket name.
@@ -292,8 +299,8 @@ class Ai4ScienceClient:
 
         Independent of container= -- artifact upload is purely
         client-side and doesn't depend on which endpoint the script
-        eventually runs against; the server injects the same S3
-        credentials into a Ray job's environment as an ephemeral one.
+        eventually runs against; a download URL works the same in every
+        job type.
 
         Raises
         ------
@@ -317,7 +324,8 @@ class Ai4ScienceClient:
                     files={"file": (os.path.basename(local_path), f)},
                     timeout=60,
                 )
-            resolved[name] = resp.json()["artifact_key"]
+            body = resp.json()
+            resolved[name] = body.get("download_url") or body["artifact_key"]
         return resolved
 
     def submit(
@@ -439,7 +447,11 @@ class Ai4ScienceClient:
             For any failure other than "not ready yet" (404).
         """
         try:
-            resp = requests.get(f"{self.base_url}/logs/{job_id}", timeout=15)
+            resp = requests.get(
+                f"{self.base_url}/logs/{job_id}",
+                headers=self._read_headers(),
+                timeout=15,
+            )
         except requests.Timeout as e:
             raise Ai4ScienceConnectionError(f"Fetching logs for job {job_id} timed out") from e
         except requests.ConnectionError as e:
@@ -463,7 +475,11 @@ class Ai4ScienceClient:
             For any failure other than "not ready yet" (404).
         """
         try:
-            resp = requests.get(f"{self.base_url}/results/{job_id}", timeout=15)
+            resp = requests.get(
+                f"{self.base_url}/results/{job_id}",
+                headers=self._read_headers(),
+                timeout=15,
+            )
         except requests.Timeout as e:
             raise Ai4ScienceConnectionError(
                 f"Fetching results for job {job_id} timed out"
@@ -605,7 +621,12 @@ class Ai4ScienceClient:
         resolved_artifacts = self._upload_artifacts(artifacts) if artifacts else None
 
         deps = list(dependencies or [])
-        if artifacts and "boto3" not in deps:
+        # boto3 is only needed for a bare S3 key (older server); download
+        # URLs are fetched with the standard library.
+        needs_boto3 = resolved_artifacts and any(
+            not is_download_url(ref) for ref in resolved_artifacts.values()
+        )
+        if needs_boto3 and "boto3" not in deps:
             deps.append("boto3")
 
         script = build_script(func, args=args, kwargs=kwargs, artifacts=resolved_artifacts)
@@ -652,6 +673,7 @@ class Ai4ScienceClient:
             "GET",
             f"{self.base_url}/api/v1/mlflow/{job_id}/run",
             action=f"Fetching the MLflow run for job {job_id}",
+            headers=self._read_headers(),
             timeout=30,
         )
         return resp.json()
