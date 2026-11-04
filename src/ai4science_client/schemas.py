@@ -118,6 +118,42 @@ class JobResult(BaseModel):
     result: Any | None = None
 
 
+class JobSubmitV2Request(BaseModel):
+    """Body sent to POST /api/v2/jobs.
+
+    runtime says how the job runs: "apptainer" (a container, the default
+    system image), "ray" (a Ray cluster in the ray image) or "eessi" (EESSI
+    software modules, no container). container is optional and, until
+    user-supplied containers are supported, may only name the system image.
+    The server validates the combination; this mirrors its JobSubmitV2.
+    """
+
+    runtime: str
+    container: str | None = None
+    script: str
+    dependencies: list[str] = Field(default_factory=list)
+    modules: list[str] = Field(default_factory=list)
+    resources: SlurmResourceConfig | None = None
+    hf_token: str | None = None
+    track: bool = False
+    experiment_name: str | None = None
+    user: str
+    token: str
+
+
+class JobV2(BaseModel):
+    """Response from POST /api/v2/jobs and GET /api/v2/jobs/{id}."""
+
+    id: str
+    runtime: str
+    container: str | None = None
+    status: str
+    slurm_job_id: int | None = None
+    created_at: str | None = None
+
+    model_config = {"extra": "ignore"}
+
+
 # --- Agentic layer (MCP endpoint at {base_url}/mcp) ---
 #
 # Response models for what the server's MCP tools return. Plain

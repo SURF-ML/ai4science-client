@@ -223,3 +223,6 @@ __marimo__/
 *.py[cod]
 .venv/
 /.idea
+
+examples/client_features.py
+examples/demo_notebook.ipynb

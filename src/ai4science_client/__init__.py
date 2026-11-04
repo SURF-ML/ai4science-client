@@ -1,6 +1,6 @@
 """Thin Python client for running functions on Snellius via ai4science."""
 
-from .client import Ai4ScienceClient, Ai4ScienceJob, Container
+from .client import Ai4ScienceClient, Ai4ScienceJob, Container, Runtime
 from .config import Ai4ScienceConfig
 from .exceptions import (
     Ai4ScienceAPIError,
@@ -18,6 +18,8 @@ from .schemas import (
     JobResult,
     JobSubmitRequest,
     JobSubmitResponse,
+    JobSubmitV2Request,
+    JobV2,
     McpTool,
     RayJobSubmitRequest,
     SlurmResourceConfig,
@@ -41,9 +43,12 @@ __all__ = [
     "JobResult",
     "JobSubmitRequest",
     "JobSubmitResponse",
+    "JobSubmitV2Request",
+    "JobV2",
     "McpTool",
     "NotSelfContainedError",
     "RayJobSubmitRequest",
+    "Runtime",
     "SlurmResourceConfig",
     "build_script",
     "job",

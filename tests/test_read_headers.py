@@ -1,5 +1,6 @@
-"""Every job read sends the caller's Slurm credentials, so the server can
-check the job belongs to them (X-Slurm-User / X-Slurm-Token)."""
+"""Every job read and artifact upload sends the caller's Slurm credentials,
+so the server can check the job (or upload prefix) belongs to them
+(X-Slurm-User / X-Slurm-Token)."""
 
 from unittest.mock import MagicMock
 
@@ -60,3 +61,27 @@ def test_tracking_run_sends_slurm_headers(monkeypatch):
     monkeypatch.setattr(client_module.requests, "request", fake_request)
     _client().tracking_run("42")
     assert seen == {"url": "https://srv/api/v1/mlflow/42/run", "headers": EXPECTED}
+
+
+def test_artifact_upload_sends_slurm_headers(monkeypatch, tmp_path):
+    seen = {}
+    path = tmp_path / "data.txt"
+    path.write_text("x")
+
+    def fake_request(method, url, **kwargs):
+        seen.update(
+            method=method,
+            url=url,
+            params=kwargs.get("params"),
+            headers=kwargs.get("headers"),
+        )
+        return _response(201, {"artifact_key": "alice/k", "download_url": "https://dl"})
+
+    monkeypatch.setattr(client_module.requests, "request", fake_request)
+    assert _client()._upload_artifacts({"data": str(path)}) == {"data": "https://dl"}
+    assert seen == {
+        "method": "POST",
+        "url": "https://srv/artifacts",
+        "params": {"user": "alice"},
+        "headers": EXPECTED,
+    }

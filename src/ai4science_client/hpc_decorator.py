@@ -12,7 +12,7 @@ from __future__ import annotations
 import functools
 from typing import Callable
 
-from .client import Ai4ScienceClient, Container
+from .client import Ai4ScienceClient, Runtime
 from .schemas import SlurmResourceConfig
 
 
@@ -30,9 +30,11 @@ def job(
     resources: SlurmResourceConfig | None = None,
     tier: str | None = None,
     cluster: str | None = None,
-    container: Container = "ephemeral",
+    container: str | None = None,
     track: bool = False,
     experiment_name: str | None = None,
+    runtime: Runtime | None = None,
+    modules: list[str] | None = None,
 ):
     """Decorator that runs the wrapped function on Snellius via ai4science.
 
@@ -40,7 +42,15 @@ def job(
     variables; imports inside the function body) and its arguments/return
     value must be JSON-serializable.
 
-    container : "ephemeral" (default) or "ray"
+    runtime : "apptainer", "ray" or "eessi" (optional)
+        Submits through /api/v2/jobs (see Ai4ScienceClient.submit).
+        modules= goes with runtime="eessi". Without runtime=, container=
+        works as before.
+
+    container : "ephemeral" (default), "ray", or your own image
+        An image reference such as "cr.surf.nl/group/project/image:tag"
+        runs the function in that image (bring your own container; see
+        Ai4ScienceClient.submit). Otherwise:
         "ephemeral" runs the function as a single process. "ray" runs
         it against a live, multi-node Ray cluster the server
         bootstraps first -- the function can call
@@ -142,6 +152,8 @@ def job(
                 container=container,
                 track=track,
                 experiment_name=experiment_name,
+                runtime=runtime,
+                modules=modules,
                 **kwargs,
             )
 

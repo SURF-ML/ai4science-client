@@ -1,11 +1,15 @@
 """Thin HTTP client for the ai4science API.
 
-Every method here maps directly to one existing ai4science endpoint:
-``submit`` -> POST /ephemeral-job or POST /ray-job (selected via
-``container=``), ``logs`` -> GET /logs/{job_id}, ``results`` ->
-GET /results/{job_id}, and (for artifacts=...) ``_upload_artifacts`` ->
-POST /artifacts. No server-side behavior is assumed beyond what those
-endpoints already do.
+Every method here maps directly to one ai4science endpoint:
+``submit`` -> POST /api/v2/jobs when ``runtime=`` is given, otherwise
+POST /ephemeral-job or POST /ray-job (selected via ``container=``, as
+before); ``logs``/``read_log`` -> GET /logs/{job_id} or
+GET /api/v2/jobs/{id}/logs; ``results`` -> GET /results/{job_id} or
+GET /api/v2/jobs/{id}/results; and (for artifacts=...)
+``_upload_artifacts`` -> POST /artifacts.
+
+Which API a job id belongs to is visible in the id itself: Slurm job ids
+(old endpoints) are numeric, /api/v2 job ids are 32-character UUIDs.
 
 Request/response shapes live in schemas.py; error types live in
 exceptions.py -- this file is HTTP plumbing only.
@@ -13,6 +17,7 @@ exceptions.py -- this file is HTTP plumbing only.
 
 from __future__ import annotations
 
+import codecs
 import os
 import time
 from typing import Any, Callable, Literal
@@ -30,6 +35,8 @@ from .schemas import (
     JobResult,
     JobSubmitRequest,
     JobSubmitResponse,
+    JobSubmitV2Request,
+    JobV2,
     RayJobSubmitRequest,
     SlurmResourceConfig,
 )
@@ -37,12 +44,20 @@ from .script_builder import RESULT_END, RESULT_START, build_script, is_download_
 
 TERMINAL_STATUSES = ("completed", "failed")
 
+# Job types of the original endpoints (container= without runtime=).
 Container = Literal["ephemeral", "ray"]
+# How a job runs, for /api/v2/jobs (runtime=).
+Runtime = Literal["apptainer", "eessi", "ray"]
 
 _ENDPOINT_BY_CONTAINER: dict[Container, str] = {
     "ephemeral": "/ephemeral-job",
     "ray": "/ray-job",
 }
+
+
+def _is_v2(job_id: str) -> bool:
+    """/api/v2 job ids are UUIDs; the original endpoints use Slurm job ids."""
+    return not str(job_id).isdigit()
 
 
 def _trailing_partial_match_len(text: str, needle: str) -> int:
@@ -162,13 +177,31 @@ class Ai4ScienceJob:
     a job was submitted with.
     """
 
-    def __init__(self, client: "Ai4ScienceClient", job_id: str):
+    def __init__(
+        self,
+        client: "Ai4ScienceClient",
+        job_id: str,
+        *,
+        runtime: str | None = None,
+        container: str | None = None,
+        slurm_job_id: int | None = None,
+    ):
         self.job_id = job_id
         self._client = client
+        # Set for jobs submitted with runtime= (/api/v2/jobs); for the
+        # original endpoints job_id already is the Slurm job id.
+        self.runtime = runtime
+        self.container = container
+        self.slurm_job_id = slurm_job_id if _is_v2(job_id) else int(job_id)
 
     def logs(self) -> str | None:
         """Return the current log text, or None if not available yet."""
         return self._client.logs(self.job_id)
+
+    def read_log(self, offset: int = 0) -> tuple[bytes, int]:
+        """Log bytes from `offset` on, and the offset to continue from.
+        See Ai4ScienceClient.read_log."""
+        return self._client.read_log(self.job_id, offset)
 
     def results(self) -> JobResult:
         """Return the current parsed status/result (may still be 'running')."""
@@ -177,7 +210,8 @@ class Ai4ScienceJob:
     def tracking_run(self) -> dict[str, Any]:
         """The MLflow run of this job (submitted with track=True). See
         Ai4ScienceClient.tracking_run."""
-        return self._client.tracking_run(self.job_id)
+        # MLflow runs are tagged with the Slurm job id.
+        return self._client.tracking_run(str(self.slurm_job_id or self.job_id))
 
     def wait(
         self,
@@ -193,9 +227,8 @@ class Ai4ScienceJob:
         not given explicitly.
 
         If stream=True, print (or call on_log with) new log output as it
-        appears, each time we poll. This is client-side tailing -- it
-        polls /logs/{job_id} and diffs against what was already shown,
-        not a real server-side streaming connection.
+        appears, each time we poll. Each poll fetches only the bytes after
+        what was already read (?offset=), see Ai4ScienceClient.wait.
 
         Raises
         ------
@@ -211,6 +244,8 @@ class Ai4ScienceJob:
 
 
     def __repr__(self) -> str:
+        if self.runtime:
+            return f"Ai4ScienceJob(job_id={self.job_id!r}, runtime={self.runtime!r})"
         return f"Ai4ScienceJob(job_id={self.job_id!r})"
 
 
@@ -280,10 +315,12 @@ class Ai4ScienceClient:
         self.token = token
         self.default_interval = interval
 
-    def _read_headers(self) -> dict[str, str]:
+    def _auth_headers(self) -> dict[str, str]:
         """Slurm credentials sent on every job read (/logs, /results, the
-        MLflow run). The server uses them to check that the job belongs to
-        this user -- the same credentials as submission, no extra API key."""
+        MLflow run) and on artifact upload. The server uses them to check
+        that the job belongs to this user, or that an upload is for this
+        user's own prefix -- the same credentials as submission, no extra
+        API key."""
         return {"X-Slurm-User": self.user, "X-Slurm-Token": self.token}
 
     def _upload_artifacts(self, artifacts: dict[str, str]) -> dict[str, str]:
@@ -321,6 +358,7 @@ class Ai4ScienceClient:
                     f"{self.base_url}/artifacts",
                     action=f"Artifact upload ('{name}')",
                     params={"user": self.user},
+                    headers=self._auth_headers(),
                     files={"file": (os.path.basename(local_path), f)},
                     timeout=60,
                 )
@@ -336,11 +374,36 @@ class Ai4ScienceClient:
         resources: SlurmResourceConfig | None = None,
         tier: str | None = None,
         cluster: str | None = None,
-        container: Container = "ephemeral",
+        container: str | None = None,
         track: bool = False,
         experiment_name: str | None = None,
+        runtime: Runtime | None = None,
+        modules: list[str] | None = None,
     ) -> Ai4ScienceJob:
         """Submit a raw script string. Returns immediately.
+
+        runtime : "apptainer", "ray" or "eessi" (optional)
+            Submits through /api/v2/jobs; the returned job's id is a UUID.
+            "apptainer" runs python_script in the system container,
+            "ray" runs it as the driver of a Ray cluster (as
+            container="ray" below), "eessi" runs it with EESSI software
+            modules (pass modules=, not dependencies=). With runtime=,
+            container= optionally names the image ("base" for apptainer,
+            "ray" for ray, nothing for eessi -- the defaults); other
+            images are not supported yet. tier/cluster are not available
+            with runtime= yet.
+
+            Without runtime=, everything works exactly as before:
+
+        container : an image reference -- bring your own container
+            e.g. "cr.surf.nl/group/project/image:tag" (or "...@sha256:<digest>").
+            The job fetches that image on the cluster (cached per user) and
+            runs python_script in it instead of the base image; implies
+            runtime="apptainer", so it goes through /api/v2/jobs. The image
+            needs python3 (and pip, for dependencies=). Only registries the
+            server allows are accepted (cr.surf.nl). A private image needs a
+            one-time login on Snellius:
+                apptainer registry login --username <user> docker://cr.surf.nl
 
         container : "ephemeral" (default) or "ray"
             "ephemeral" posts to /ephemeral-job and runs python_script
@@ -386,13 +449,48 @@ class Ai4ScienceClient:
         Raises
         ------
         ValueError
-            If tier or cluster is given with container="ray".
+            If tier or cluster is given with container="ray" or with
+            runtime=, if modules= is given without runtime="eessi", or if
+            container= is not "ephemeral"/"ray" without runtime=.
         Ai4ScienceConnectionError
             If the ai4science API is unreachable.
         Ai4ScienceAPIError
             If the API rejects the submission (bad credentials, invalid
             resource request, etc.) -- carries the server's detail message.
         """
+        if runtime is None and container and "/" in container:
+            # An image reference: bring your own container, via /api/v2/jobs.
+            runtime = "apptainer"
+        if runtime is not None:
+            if tier is not None or cluster is not None:
+                raise ValueError(
+                    "tier/cluster are not supported with runtime= yet. Omit "
+                    "both, or submit without runtime= (container='ephemeral')."
+                )
+            return self._submit_v2(
+                JobSubmitV2Request(
+                    runtime=runtime,
+                    container=container,
+                    script=python_script,
+                    dependencies=dependencies or [],
+                    modules=modules or [],
+                    resources=resources,
+                    hf_token=hf_token,
+                    track=track,
+                    experiment_name=experiment_name,
+                    user=self.user,
+                    token=self.token,
+                )
+            )
+        if modules:
+            raise ValueError("modules= needs runtime='eessi'.")
+        container = container or "ephemeral"
+        if container not in _ENDPOINT_BY_CONTAINER:
+            raise ValueError(
+                f"container={container!r} is not a job type. Use "
+                "container='ephemeral' or 'ray', or pass runtime= "
+                "('apptainer', 'ray' or 'eessi')."
+            )
         if container == "ray":
             if tier is not None or cluster is not None:
                 raise ValueError(
@@ -424,7 +522,7 @@ class Ai4ScienceClient:
                 experiment_name=experiment_name,
             )
 
-        endpoint = _ENDPOINT_BY_CONTAINER[container]
+        endpoint = _ENDPOINT_BY_CONTAINER[container]  # type: ignore[index]
         resp = _request(
             "POST",
             f"{self.base_url}{endpoint}",
@@ -435,8 +533,71 @@ class Ai4ScienceClient:
         submitted = JobSubmitResponse.model_validate(resp.json())
         return Ai4ScienceJob(self, str(submitted.job_id))
 
+    def _submit_v2(self, request: JobSubmitV2Request) -> Ai4ScienceJob:
+        """POST /api/v2/jobs."""
+        resp = _request(
+            "POST",
+            f"{self.base_url}/api/v2/jobs",
+            action=f"Job submission ({request.runtime})",
+            json=request.model_dump(exclude_none=True),
+            timeout=30,
+        )
+        job = JobV2.model_validate(resp.json())
+        return Ai4ScienceJob(
+            self,
+            job.id,
+            runtime=job.runtime,
+            container=job.container,
+            slurm_job_id=job.slurm_job_id,
+        )
+
+    def _job_url(self, job_id: str, what: str) -> str:
+        """URL of a job's logs/results, for either kind of job id."""
+        if _is_v2(job_id):
+            return f"{self.base_url}/api/v2/jobs/{job_id}/{what}"
+        return f"{self.base_url}/{what}/{job_id}"
+
+    def _get(self, url: str, *, action: str, **kwargs: Any) -> requests.Response:
+        """A job read: GET with the Slurm read headers; network failures
+        become Ai4ScienceConnectionError. The caller checks the status."""
+        try:
+            return requests.get(url, headers=self._auth_headers(), timeout=15, **kwargs)
+        except requests.Timeout as e:
+            raise Ai4ScienceConnectionError(f"{action} timed out") from e
+        except requests.ConnectionError as e:
+            raise Ai4ScienceConnectionError(
+                f"Could not reach {self.base_url} for: {action}: {e}"
+            ) from e
+
+    def read_log(self, job_id: str, offset: int = 0) -> tuple[bytes, int]:
+        """Log bytes from `offset` on, and the offset to ask for next time.
+
+        Returns (b"", offset) while the log doesn't exist yet. Only new
+        bytes cross the network (?offset=, X-Next-Offset). An older server
+        that ignores ?offset= returns the whole log; that is detected (no
+        X-Next-Offset header) and sliced here, so the result is the same.
+
+        Raises
+        ------
+        Ai4ScienceConnectionError, Ai4ScienceAPIError
+            For any failure other than "not ready yet" (404).
+        """
+        action = f"Fetching logs for job {job_id}"
+        resp = self._get(
+            self._job_url(job_id, "logs"), action=action, params={"offset": offset}
+        )
+        if resp.status_code == 404:
+            return b"", offset
+        _raise_for_response(resp, action=action)
+        next_offset = resp.headers.get("X-Next-Offset")
+        if next_offset is not None:
+            return resp.content, int(next_offset)
+        full = resp.content
+        return full[offset:], max(len(full), offset)
+
     def logs(self, job_id: str) -> str | None:
-        """GET /logs/{job_id}. Returns None if the log isn't available yet (404).
+        """GET /logs/{job_id} (or /api/v2/jobs/{id}/logs for a UUID).
+        Returns None if the log isn't available yet (404).
 
         Shared across container types -- this route doesn't distinguish
         job type.
@@ -448,8 +609,8 @@ class Ai4ScienceClient:
         """
         try:
             resp = requests.get(
-                f"{self.base_url}/logs/{job_id}",
-                headers=self._read_headers(),
+                self._job_url(job_id, "logs"),
+                headers=self._auth_headers(),
                 timeout=15,
             )
         except requests.Timeout as e:
@@ -464,7 +625,8 @@ class Ai4ScienceClient:
         return resp.text
 
     def results(self, job_id: str) -> JobResult:
-        """GET /results/{job_id}. Returns a 'status: unknown' placeholder if not ready.
+        """GET /results/{job_id} (or /api/v2/jobs/{id}/results for a UUID).
+        Returns a 'status: unknown' placeholder if not ready.
 
         Shared across container types -- this route doesn't distinguish
         job type.
@@ -476,8 +638,8 @@ class Ai4ScienceClient:
         """
         try:
             resp = requests.get(
-                f"{self.base_url}/results/{job_id}",
-                headers=self._read_headers(),
+                self._job_url(job_id, "results"),
+                headers=self._auth_headers(),
                 timeout=15,
             )
         except requests.Timeout as e:
@@ -491,7 +653,10 @@ class Ai4ScienceClient:
         if resp.status_code == 404:
             return JobResult(job_id=job_id, status="unknown")
         _raise_for_response(resp, action=f"Fetching results for job {job_id}")
-        return JobResult.model_validate(resp.json())
+        body = resp.json()
+        if _is_v2(job_id):  # /api/v2 calls the job's id "id"
+            body = {**body, "job_id": body.pop("id", job_id)}
+        return JobResult.model_validate(body)
 
     def wait(
         self,
@@ -505,11 +670,12 @@ class Ai4ScienceClient:
 
         interval defaults to self.default_interval when not given.
 
-        If stream=True, also poll /logs/{job_id} each round and print
-        (or call on_log with) only the new text since the last poll --
-        this is client-side tailing, not a real server-sent stream. The
-        raw result marker block is never shown -- once it fully
-        arrives, it's replaced with one decoded, human-readable line.
+        If stream=True, also fetch the log each round and print (or call
+        on_log with) only the new text since the last poll. Only new bytes
+        are fetched (read_log, ?offset=), so a long log isn't downloaded
+        again on every poll. The raw result marker block is never shown --
+        once it fully arrives, it's replaced with one decoded,
+        human-readable line.
 
         Shared across container types -- this route doesn't distinguish
         job type.
@@ -526,21 +692,29 @@ class Ai4ScienceClient:
         """
         interval = self.default_interval if interval is None else interval
         on_log = on_log or (lambda text: print(text, end="", flush=True))
+        # Log bytes are fetched incrementally; a UTF-8 character split over
+        # two fetches is held back by the decoder until it is complete.
+        decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+        raw_text = ""
+        offset = 0
         seen_len = 0
+
+        def show_new_output() -> None:
+            nonlocal raw_text, offset, seen_len
+            data, offset = self.read_log(job_id, offset)
+            raw_text += decoder.decode(data)
+            chunk, seen_len = _new_chunk(_display_text(raw_text), seen_len)
+            if chunk:
+                on_log(chunk)
+
         elapsed = 0
         while elapsed < timeout:
             if stream:
-                chunk, seen_len = _new_chunk(_display_text(self.logs(job_id) or ""), seen_len)
-                if chunk:
-                    on_log(chunk)
+                show_new_output()
             result = self.results(job_id)
             if result.status in TERMINAL_STATUSES:
                 if stream:
-                    chunk, seen_len = _new_chunk(
-                        _display_text(self.logs(job_id) or ""), seen_len
-                    )
-                    if chunk:
-                        on_log(chunk)
+                    show_new_output()
                 return result
             time.sleep(interval)
             elapsed += interval
@@ -563,9 +737,11 @@ class Ai4ScienceClient:
         resources: SlurmResourceConfig | None = None,
         tier: str | None = None,
         cluster: str | None = None,
-        container: Container = "ephemeral",
+        container: str | None = None,
         track: bool = False,
         experiment_name: str | None = None,
+        runtime: Runtime | None = None,
+        modules: list[str] | None = None,
         **kwargs: Any,
     ) -> Any:
         """Build a script from func, submit it, block until done, return the result.
@@ -576,7 +752,12 @@ class Ai4ScienceClient:
         defaults to self.default_interval when not given. Pass
         stream=True to print live log output while waiting.
 
-        container : "ephemeral" (default) or "ray" -- see submit()'s
+        runtime : "apptainer", "ray" or "eessi" (optional) -- submits
+            through /api/v2/jobs; see submit(). modules= goes with
+            runtime="eessi". Without runtime=, container= works as before.
+
+        container : "ephemeral" (default), "ray", or your own image
+            ("cr.surf.nl/group/project/image:tag") -- see submit()'s
             docstring for the full explanation. With container="ray",
             func can call ray.init(address="auto") directly; the
             cluster is already up by the time it runs. resources.nodes
@@ -626,7 +807,8 @@ class Ai4ScienceClient:
         needs_boto3 = resolved_artifacts and any(
             not is_download_url(ref) for ref in resolved_artifacts.values()
         )
-        if needs_boto3 and "boto3" not in deps:
+        # (EESSI jobs take modules, not pip dependencies.)
+        if needs_boto3 and "boto3" not in deps and runtime != "eessi":
             deps.append("boto3")
 
         script = build_script(func, args=args, kwargs=kwargs, artifacts=resolved_artifacts)
@@ -640,13 +822,15 @@ class Ai4ScienceClient:
             container=container,
             track=track,
             experiment_name=experiment_name,
+            runtime=runtime,
+            modules=modules,
         )
         result = job.wait(interval=interval, timeout=timeout, stream=stream, on_log=on_log)
         if result.status != "completed":
             raise Ai4ScienceJobFailedError(
                 f"job {job.job_id} finished with status={result.status} "
                 f"(exit_code={result.exit_code}). "
-                f"Logs: {self.base_url}/logs/{job.job_id}",
+                f"Logs: {self._job_url(job.job_id, 'logs')}",
                 job_id=job.job_id,
                 status=result.status,
                 exit_code=result.exit_code,
@@ -669,11 +853,35 @@ class Ai4ScienceClient:
         Ai4ScienceConnectionError
             If the API itself can't be reached.
         """
+        if _is_v2(job_id):  # MLflow runs are tagged with the Slurm job id
+            job_id = str(self.job(job_id).slurm_job_id)
         resp = _request(
             "GET",
             f"{self.base_url}/api/v1/mlflow/{job_id}/run",
             action=f"Fetching the MLflow run for job {job_id}",
-            headers=self._read_headers(),
+            headers=self._auth_headers(),
             timeout=30,
         )
         return resp.json()
+
+    def job(self, job_id: str) -> Ai4ScienceJob:
+        """A handle to an existing job, e.g. one submitted earlier. For an
+        /api/v2 job (UUID) its runtime, container and Slurm job id are
+        looked up (GET /api/v2/jobs/{id})."""
+        if not _is_v2(job_id):
+            return Ai4ScienceJob(self, str(job_id))
+        resp = _request(
+            "GET",
+            f"{self.base_url}/api/v2/jobs/{job_id}",
+            action=f"Fetching job {job_id}",
+            headers=self._auth_headers(),
+            timeout=15,
+        )
+        job = JobV2.model_validate(resp.json())
+        return Ai4ScienceJob(
+            self,
+            job.id,
+            runtime=job.runtime,
+            container=job.container,
+            slurm_job_id=job.slurm_job_id,
+        )
