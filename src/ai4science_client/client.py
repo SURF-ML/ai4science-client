@@ -395,6 +395,16 @@ class Ai4ScienceClient:
 
             Without runtime=, everything works exactly as before:
 
+        container : an image reference -- bring your own container
+            e.g. "cr.surf.nl/group/project/image:tag" (or "...@sha256:<digest>").
+            The job fetches that image on the cluster (cached per user) and
+            runs python_script in it instead of the base image; implies
+            runtime="apptainer", so it goes through /api/v2/jobs. The image
+            needs python3 (and pip, for dependencies=). Only registries the
+            server allows are accepted (cr.surf.nl). A private image needs a
+            one-time login on Snellius:
+                apptainer registry login --username <user> docker://cr.surf.nl
+
         container : "ephemeral" (default) or "ray"
             "ephemeral" posts to /ephemeral-job and runs python_script
             as a single process. "ray" posts to /ray-job: the server
@@ -448,6 +458,9 @@ class Ai4ScienceClient:
             If the API rejects the submission (bad credentials, invalid
             resource request, etc.) -- carries the server's detail message.
         """
+        if runtime is None and container and "/" in container:
+            # An image reference: bring your own container, via /api/v2/jobs.
+            runtime = "apptainer"
         if runtime is not None:
             if tier is not None or cluster is not None:
                 raise ValueError(
@@ -743,7 +756,8 @@ class Ai4ScienceClient:
             through /api/v2/jobs; see submit(). modules= goes with
             runtime="eessi". Without runtime=, container= works as before.
 
-        container : "ephemeral" (default) or "ray" -- see submit()'s
+        container : "ephemeral" (default), "ray", or your own image
+            ("cr.surf.nl/group/project/image:tag") -- see submit()'s
             docstring for the full explanation. With container="ray",
             func can call ray.init(address="auto") directly; the
             cluster is already up by the time it runs. resources.nodes

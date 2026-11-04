@@ -47,7 +47,10 @@ def job(
         modules= goes with runtime="eessi". Without runtime=, container=
         works as before.
 
-    container : "ephemeral" (default) or "ray"
+    container : "ephemeral" (default), "ray", or your own image
+        An image reference such as "cr.surf.nl/group/project/image:tag"
+        runs the function in that image (bring your own container; see
+        Ai4ScienceClient.submit). Otherwise:
         "ephemeral" runs the function as a single process. "ray" runs
         it against a live, multi-node Ray cluster the server
         bootstraps first -- the function can call

@@ -199,3 +199,28 @@ def test_run_with_eessi_sends_modules(server):
         ["SciPy-bundle"],
         [],
     )
+
+
+IMAGE = "cr.surf.nl/mcc-mcc/odissee/training:v2"
+
+
+def test_own_image_goes_to_v2_as_apptainer(server):
+    job = _client().submit("print(1)", container=IMAGE)
+    (_, url, kwargs), = server.calls
+    assert url == "https://srv/api/v2/jobs"
+    assert (kwargs["json"]["runtime"], kwargs["json"]["container"]) == ("apptainer", IMAGE)
+    assert job.job_id == UUID
+
+
+def test_decorator_with_own_image(server):
+    from ai4science_client import job
+
+    server.result = {"status": "completed", "exit_code": 0, "result": 7}
+
+    @job(base_url="https://srv", user="alice", token="tok", container=IMAGE, interval=0)
+    def add(x, y):
+        return x + y
+
+    assert add(3, 4) == 7
+    body = server.calls[0][2]["json"]
+    assert (body["runtime"], body["container"]) == ("apptainer", IMAGE)
