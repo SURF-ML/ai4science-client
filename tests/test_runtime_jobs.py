@@ -106,6 +106,7 @@ def test_runtime_submits_to_v2(server):
         "track": False,
         "user": "alice",
         "token": "tok",
+        "logins": {},
     }
     assert (job.job_id, job.runtime, job.container, job.slurm_job_id) == (
         UUID,
@@ -118,8 +119,6 @@ def test_runtime_submits_to_v2(server):
 @pytest.mark.parametrize(
     "kwargs",
     [
-        {"runtime": "apptainer", "tier": "auto"},
-        {"runtime": "ray", "cluster": "snellius"},
         {"modules": ["Python"]},
         {"container": "base"},
     ],
@@ -224,3 +223,17 @@ def test_decorator_with_own_image(server):
     assert add(3, 4) == 7
     body = server.calls[0][2]["json"]
     assert (body["runtime"], body["container"]) == ("apptainer", IMAGE)
+
+
+def test_runtime_jobs_route_with_the_callers_logins(server):
+    c = Ai4ScienceClient(
+        base_url="https://srv",
+        user="alice",
+        token="tok",
+        interval=0,
+        logins={"snellius": ("alice2", "s-tok")},
+    )
+    c.submit("print(1)", runtime="apptainer", tier="auto")
+    body = server.calls[0][2]["json"]
+    assert body["tier"] == "auto"
+    assert body["logins"] == {"snellius": {"user": "alice2", "token": "s-tok"}}

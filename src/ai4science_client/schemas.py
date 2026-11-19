@@ -126,6 +126,8 @@ class JobSubmitV2Request(BaseModel):
     software modules, no container). container is optional and, until
     user-supplied containers are supported, may only name the system image.
     The server validates the combination; this mirrors its JobSubmitV2.
+    cluster/tier pick where it runs; logins are the caller's logins on
+    clusters other than the server's default ({name: {user, token}}).
     """
 
     runtime: str
@@ -139,6 +141,9 @@ class JobSubmitV2Request(BaseModel):
     experiment_name: str | None = None
     user: str
     token: str
+    cluster: str | None = None
+    tier: str | None = None
+    logins: dict[str, dict[str, str]] = Field(default_factory=dict)
 
 
 class JobV2(BaseModel):

@@ -18,8 +18,11 @@ exceptions.py -- this file is HTTP plumbing only.
 from __future__ import annotations
 
 import codecs
+import io
 import os
 import time
+import zipfile
+from pathlib import Path
 from typing import Any, Callable, Literal
 
 import requests
@@ -271,6 +274,12 @@ class Ai4ScienceClient:
         Default poll interval in seconds, used by wait()/run() whenever
         a call doesn't specify its own interval. Falls back to
         AI4SCIENCE_POLL_INTERVAL (or 10 if that's also unset).
+    logins : dict[str, tuple[str, str]] | None
+        Your (user, token) on clusters other than the server's default,
+        by catalog name, e.g. {"snellius": ("jdoe", token)}. Jobs with
+        runtime= can then run there (cluster= / tier=); a cluster you
+        have no login for is never picked. user/token above stay your
+        login on the default cluster.
 
     Raises
     ------
@@ -287,6 +296,7 @@ class Ai4ScienceClient:
         user: str | None = None,
         token: str | None = None,
         interval: int | None = None,
+        logins: dict[str, tuple[str, str]] | None = None,
     ):
         if base_url is None or user is None or token is None or interval is None:
             # Importing here (not at module load) triggers config.py's
@@ -314,6 +324,7 @@ class Ai4ScienceClient:
         self.user = user
         self.token = token
         self.default_interval = interval
+        self.logins = dict(logins or {})
 
     def _auth_headers(self) -> dict[str, str]:
         """Slurm credentials sent on every job read (/logs, /results, the
@@ -390,8 +401,10 @@ class Ai4ScienceClient:
             modules (pass modules=, not dependencies=). With runtime=,
             container= optionally names the image ("base" for apptainer,
             "ray" for ray, nothing for eessi -- the defaults); other
-            images are not supported yet. tier/cluster are not available
-            with runtime= yet.
+            images are not supported yet. With runtime=, tier/cluster
+            route across every cluster you can log in to (see logins=
+            on the client); without them the job goes to the server's
+            default cluster.
 
             Without runtime=, everything works exactly as before:
 
@@ -462,11 +475,6 @@ class Ai4ScienceClient:
             # An image reference: bring your own container, via /api/v2/jobs.
             runtime = "apptainer"
         if runtime is not None:
-            if tier is not None or cluster is not None:
-                raise ValueError(
-                    "tier/cluster are not supported with runtime= yet. Omit "
-                    "both, or submit without runtime= (container='ephemeral')."
-                )
             return self._submit_v2(
                 JobSubmitV2Request(
                     runtime=runtime,
@@ -480,6 +488,12 @@ class Ai4ScienceClient:
                     experiment_name=experiment_name,
                     user=self.user,
                     token=self.token,
+                    cluster=cluster,
+                    tier=tier,
+                    logins={
+                        name: {"user": user, "token": token}
+                        for name, (user, token) in self.logins.items()
+                    },
                 )
             )
         if modules:
@@ -863,6 +877,53 @@ class Ai4ScienceClient:
             timeout=30,
         )
         return resp.json()
+
+    def runs(self, experiment_name: str, limit: int = 50) -> list[dict[str, Any]]:
+        """GET /api/v1/mlflow/by-name/{user}/{experiment}/runs: your runs of
+        one experiment (the experiment_name given at submission), newest
+        first -- run_id, job_id, status, start_time, metrics, ui_url."""
+        resp = _request(
+            "GET",
+            f"{self.base_url}/api/v1/mlflow/by-name/{self.user}/{experiment_name}/runs",
+            action=f"Listing runs of {experiment_name}",
+            params={"limit": limit},
+            headers=self._auth_headers(),
+            timeout=30,
+        )
+        return resp.json()["items"]
+
+    def list_models(self) -> list[dict[str, Any]]:
+        """GET /api/v1/mlflow/models: the models your jobs registered, each
+        with its versions (newest first). A job registers one under the
+        name prefix in its HIPPOCAMPUS_MODEL_PREFIX environment variable."""
+        resp = _request(
+            "GET",
+            f"{self.base_url}/api/v1/mlflow/models",
+            action="Listing models",
+            params={"user": self.user},
+            headers=self._auth_headers(),
+            timeout=30,
+        )
+        return resp.json()["items"]
+
+    def download_model(
+        self, name: str, version: int | str = "latest", dest: str | Path = "."
+    ) -> Path:
+        """Download one of your models and unpack it into dest/<name>-v<n>/,
+        an MLflow model directory: mlflow.pyfunc.load_model(<that dir>) runs
+        it anywhere with the libraries in its requirements.txt."""
+        resp = _request(
+            "GET",
+            f"{self.base_url}/api/v1/mlflow/models/{name}/versions/{version}/download",
+            action=f"Downloading model {name} version {version}",
+            params={"user": self.user},
+            headers=self._auth_headers(),
+            timeout=600,
+        )
+        target = Path(dest) / f"{name}-v{resp.headers['X-Model-Version']}"
+        with zipfile.ZipFile(io.BytesIO(resp.content)) as archive:
+            archive.extractall(target)
+        return target
 
     def job(self, job_id: str) -> Ai4ScienceJob:
         """A handle to an existing job, e.g. one submitted earlier. For an
