@@ -19,10 +19,14 @@ def server(monkeypatch):
     return FakeServer(monkeypatch)
 
 
-@pytest.fixture
-def env(monkeypatch):
+@pytest.fixture(autouse=True)
+def _no_mlflow_login_in_the_environment(monkeypatch):
     for name in MLFLOW_VARS:
         monkeypatch.delenv(name, raising=False)
+
+
+@pytest.fixture
+def env(monkeypatch):
     monkeypatch.setenv("AI4SCIENCE_BASE_URL", "https://srv")
     monkeypatch.setenv("SLURM_USER", "alice")
     monkeypatch.setenv("SLURM_TOKEN", "tok")
@@ -88,3 +92,10 @@ def test_a_token_from_the_environment(server, env):
 def test_no_mlflow_login_in_the_environment(server, env):
     client = Ai4ScienceClient(interval=0)
     assert (client.mlflow_username, client.mlflow_token) == (None, None)
+
+
+def test_the_environment_login_is_read_also_with_explicit_arguments(env):
+    env.setenv("MLFLOW_TRACKING_USERNAME", "jane.doe")
+    env.setenv("MLFLOW_TRACKING_PASSWORD", "pw")
+    client = _client()
+    assert (client.mlflow_username, client.mlflow_token) == ("jane.doe", "pw")

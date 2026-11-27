@@ -260,7 +260,8 @@ class Ai4ScienceClient:
     AI4SCIENCE_POLL_INTERVAL -- see .env.example; a local .env file is
     loaded automatically via config.py). Pass explicit values to skip
     the environment entirely -- no .env file or env vars are required
-    if you supply base_url/user/token yourself.
+    if you supply base_url/user/token yourself. The MLflow login (below)
+    falls back to its environment variables either way.
 
     Parameters
     ----------
@@ -321,13 +322,15 @@ class Ai4ScienceClient:
             token = token or os.environ.get("SLURM_TOKEN")
             if interval is None:
                 interval = int(os.environ.get("AI4SCIENCE_POLL_INTERVAL", "10"))
-            if mlflow_token is None:
-                env_user = mlflow_username or os.environ.get("MLFLOW_TRACKING_USERNAME")
-                env_password = os.environ.get("MLFLOW_TRACKING_PASSWORD")
-                if env_user and env_password:
-                    mlflow_username, mlflow_token = env_user, env_password
-                else:
-                    mlflow_token = os.environ.get("MLFLOW_TRACKING_TOKEN")
+        if mlflow_token is None:
+            # Always consulted: these are the mlflow library's own variables,
+            # often set for it rather than in this client's .env.
+            env_user = mlflow_username or os.environ.get("MLFLOW_TRACKING_USERNAME")
+            env_password = os.environ.get("MLFLOW_TRACKING_PASSWORD")
+            if env_user and env_password:
+                mlflow_username, mlflow_token = env_user, env_password
+            else:
+                mlflow_token = os.environ.get("MLFLOW_TRACKING_TOKEN")
         missing = [
             name
             for name, value in [("base_url", base_url), ("user", user), ("token", token)]
