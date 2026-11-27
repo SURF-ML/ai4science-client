@@ -287,6 +287,52 @@ job_handle.results()                 # non-blocking status check
 result = job_handle.wait()           # block until done, when ready
 ```
 
+### MLflow tracking
+
+`track=True` makes the server open an MLflow run for the job. For the job
+to log to that run itself (metrics, artifacts, models) on a deployment
+whose MLflow server has its own accounts, give the client your MLflow
+login. In a `.env` file, with the same names the `mlflow` library reads:
+
+```bash
+# A token...
+MLFLOW_TRACKING_TOKEN=...
+# ...or a username/password login (the username may differ from SLURM_USER)
+MLFLOW_TRACKING_USERNAME=jane.doe
+MLFLOW_TRACKING_PASSWORD=...
+```
+
+Or in code:
+
+```python
+client = Ai4ScienceClient(mlflow_token="...", mlflow_username="jane.doe")
+job_handle = client.submit(script, runtime="apptainer", track=True)
+```
+
+The login is sent only with tracked jobs on the default container or
+`runtime="apptainer"`; the job gets it as `MLFLOW_TRACKING_TOKEN`, or as
+`MLFLOW_TRACKING_USERNAME`/`MLFLOW_TRACKING_PASSWORD` when a username is
+set, next to `MLFLOW_TRACKING_URI` and `MLFLOW_RUN_ID`, so plain
+`mlflow.start_run()` logs to the job's run.
+
+The server opens the run with that login before the job starts, and the
+job's wrapper ends it when the job exits or is cancelled. Some deployments
+(development) require the login for `track=True`.
+
+With a login, the client also reads your runs and models from MLflow
+itself, with that login (`pip install 'ai4science-client[mlflow]'`):
+
+```python
+job.tracking_run()                      # the handle from submit()
+client.runs("iris-notebook")
+client.download_model("iris", "latest", dest="downloads")
+```
+
+Two limits for now: `job.tracking_run()` needs the handle that `submit()`
+returned (a handle from `client.job(...)` has no run id), and
+`client.list_models()` is not available with a login, because the hosted
+MLflow's search does not return your own models yet.
+
 ## Examples
 
 - **[`examples/demo_notebook.ipynb`](examples/demo_notebook.ipynb)** --

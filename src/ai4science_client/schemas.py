@@ -58,6 +58,11 @@ class JobSubmitRequest(BaseModel):
     before these fields existed. Field names must stay in sync with the
     server's EphemeralJobRequest.track/experiment_name
     (app/common/schemas/request_schemas.py in ai4science-poc).
+
+    mlflow_token/mlflow_username: the caller's own login on the MLflow
+    server, for a tracked job that logs to its run itself (see
+    Ai4ScienceClient). Omitted when unset, so older servers see the same
+    body as before.
     """
 
     dependencies: list[str] = Field(default_factory=list)
@@ -70,6 +75,8 @@ class JobSubmitRequest(BaseModel):
     cluster: str | None = None
     track: bool = False
     experiment_name: str | None = None
+    mlflow_token: str | None = None
+    mlflow_username: str | None = None
 
 
 class RayJobSubmitRequest(BaseModel):
@@ -107,6 +114,7 @@ class JobSubmitResponse(BaseModel):
 
     job_id: int
     status: str | None = None
+    mlflow_run_id: str | None = None
 
 
 class JobResult(BaseModel):
@@ -126,6 +134,8 @@ class JobSubmitV2Request(BaseModel):
     software modules, no container). container is optional and, until
     user-supplied containers are supported, may only name the system image.
     The server validates the combination; this mirrors its JobSubmitV2.
+    cluster/tier pick where it runs; logins are the caller's logins on
+    clusters other than the server's default ({name: {user, token}}).
     """
 
     runtime: str
@@ -137,8 +147,13 @@ class JobSubmitV2Request(BaseModel):
     hf_token: str | None = None
     track: bool = False
     experiment_name: str | None = None
+    mlflow_token: str | None = None
+    mlflow_username: str | None = None
     user: str
     token: str
+    cluster: str | None = None
+    tier: str | None = None
+    logins: dict[str, dict[str, str]] = Field(default_factory=dict)
 
 
 class JobV2(BaseModel):
@@ -150,6 +165,7 @@ class JobV2(BaseModel):
     status: str
     slurm_job_id: int | None = None
     created_at: str | None = None
+    mlflow_run_id: str | None = None
 
     model_config = {"extra": "ignore"}
 
