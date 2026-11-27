@@ -114,6 +114,7 @@ class JobSubmitResponse(BaseModel):
 
     job_id: int
     status: str | None = None
+    mlflow_run_id: str | None = None
 
 
 class JobResult(BaseModel):
@@ -164,6 +165,7 @@ class JobV2(BaseModel):
     status: str
     slurm_job_id: int | None = None
     created_at: str | None = None
+    mlflow_run_id: str | None = None
 
     model_config = {"extra": "ignore"}
 

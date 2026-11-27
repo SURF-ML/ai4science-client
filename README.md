@@ -315,6 +315,24 @@ The login is sent only with tracked jobs on the default container or
 set, next to `MLFLOW_TRACKING_URI` and `MLFLOW_RUN_ID`, so plain
 `mlflow.start_run()` logs to the job's run.
 
+The server opens the run with that login before the job starts, and the
+job's wrapper ends it when the job exits or is cancelled. Some deployments
+(development) require the login for `track=True`.
+
+With a login, the client also reads your runs and models from MLflow
+itself, with that login (`pip install 'ai4science-client[mlflow]'`):
+
+```python
+job.tracking_run()                      # the handle from submit()
+client.runs("iris-notebook")
+client.download_model("iris", "latest", dest="downloads")
+```
+
+Two limits for now: `job.tracking_run()` needs the handle that `submit()`
+returned (a handle from `client.job(...)` has no run id), and
+`client.list_models()` is not available with a login, because the hosted
+MLflow's search does not return your own models yet.
+
 ## Examples
 
 - **[`examples/demo_notebook.ipynb`](examples/demo_notebook.ipynb)** --

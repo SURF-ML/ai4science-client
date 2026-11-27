@@ -14,6 +14,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Reading your runs and models straight from MLflow with your own login
+mlflow = ["mlflow-skinny>=3.16"]
 dev = [
     "pytest>=8.0.0",
     "responses>=0.25.0",

@@ -30,10 +30,12 @@ import requests
 from .exceptions import (
     Ai4ScienceAPIError,
     Ai4ScienceConnectionError,
+    Ai4ScienceError,
     Ai4ScienceJobFailedError,
     Ai4ScienceTimeoutError,
     ArtifactNotFoundError,
 )
+from .native_mlflow import NativeMlflow
 from .schemas import (
     JobResult,
     JobSubmitRequest,
@@ -188,9 +190,13 @@ class Ai4ScienceJob:
         runtime: str | None = None,
         container: str | None = None,
         slurm_job_id: int | None = None,
+        mlflow_run_id: str | None = None,
     ):
         self.job_id = job_id
         self._client = client
+        # From the submit response of a tracked job; not known for a handle
+        # made later with Ai4ScienceClient.job().
+        self.mlflow_run_id = mlflow_run_id
         # Set for jobs submitted with runtime= (/api/v2/jobs); for the
         # original endpoints job_id already is the Slurm job id.
         self.runtime = runtime
@@ -212,7 +218,17 @@ class Ai4ScienceJob:
 
     def tracking_run(self) -> dict[str, Any]:
         """The MLflow run of this job (submitted with track=True). See
-        Ai4ScienceClient.tracking_run."""
+        Ai4ScienceClient.tracking_run. With an MLflow login on the client,
+        read from MLflow itself, which needs this handle from submit()."""
+        if self._client.mlflow_token:
+            # shortcut: the run id is only in the submit response, so a handle
+            # from job() has none; store it with the job when that is needed.
+            if not self.mlflow_run_id:
+                raise Ai4ScienceError(
+                    "This job's MLflow run is only known to the handle that "
+                    "submit() returned (submitted with track=True)."
+                )
+            return self._client._native().run(self.mlflow_run_id)
         # MLflow runs are tagged with the Slurm job id.
         return self._client.tracking_run(str(self.slurm_job_id or self.job_id))
 
@@ -349,6 +365,23 @@ class Ai4ScienceClient:
         self.logins = dict(logins or {})
         self.mlflow_token = mlflow_token or None
         self.mlflow_username = mlflow_username if self.mlflow_token else None
+        self._native_mlflow: NativeMlflow | None = None
+
+    def _native(self) -> NativeMlflow:
+        """Reads straight from MLflow with your login; the server says where
+        it is and which name prefixes are yours (asked once)."""
+        if self._native_mlflow is None:
+            resp = _request(
+                "GET",
+                f"{self.base_url}/api/v1/mlflow/config",
+                action="Fetching the MLflow configuration",
+                params={"user": self.user},
+                timeout=15,
+            )
+            self._native_mlflow = NativeMlflow(
+                resp.json(), self.mlflow_username, self.mlflow_token or ""
+            )
+        return self._native_mlflow
 
     def _mlflow_login(self, track: bool) -> dict[str, str | None]:
         """The MLflow login fields of a submission: only a tracked job's
@@ -581,7 +614,9 @@ class Ai4ScienceClient:
             timeout=30,
         )
         submitted = JobSubmitResponse.model_validate(resp.json())
-        return Ai4ScienceJob(self, str(submitted.job_id))
+        return Ai4ScienceJob(
+            self, str(submitted.job_id), mlflow_run_id=submitted.mlflow_run_id
+        )
 
     def _submit_v2(self, request: JobSubmitV2Request) -> Ai4ScienceJob:
         """POST /api/v2/jobs."""
@@ -599,6 +634,7 @@ class Ai4ScienceClient:
             runtime=job.runtime,
             container=job.container,
             slurm_job_id=job.slurm_job_id,
+            mlflow_run_id=job.mlflow_run_id,
         )
 
     def _job_url(self, job_id: str, what: str) -> str:
@@ -903,6 +939,11 @@ class Ai4ScienceClient:
         Ai4ScienceConnectionError
             If the API itself can't be reached.
         """
+        if self.mlflow_token:
+            raise Ai4ScienceError(
+                "With an MLflow login, use the job handle from submit(): "
+                "job.tracking_run()."
+            )
         if _is_v2(job_id):  # MLflow runs are tagged with the Slurm job id
             job_id = str(self.job(job_id).slurm_job_id)
         resp = _request(
@@ -918,6 +959,8 @@ class Ai4ScienceClient:
         """GET /api/v1/mlflow/by-name/{user}/{experiment}/runs: your runs of
         one experiment (the experiment_name given at submission), newest
         first -- run_id, job_id, status, start_time, metrics, ui_url."""
+        if self.mlflow_token:
+            return self._native().runs(experiment_name, limit)
         resp = _request(
             "GET",
             f"{self.base_url}/api/v1/mlflow/by-name/{self.user}/{experiment_name}/runs",
@@ -932,6 +975,13 @@ class Ai4ScienceClient:
         """GET /api/v1/mlflow/models: the models your jobs registered, each
         with its versions (newest first). A job registers one under the
         name prefix in its HIPPOCAMPUS_MODEL_PREFIX environment variable."""
+        if self.mlflow_token:
+            # shortcut: the hosted MLflow's searches return none of your own
+            # models; list them natively once its search finds them.
+            raise Ai4ScienceError(
+                "Listing models is not available with an MLflow login yet; "
+                "download_model(name, version) works."
+            )
         resp = _request(
             "GET",
             f"{self.base_url}/api/v1/mlflow/models",
@@ -948,6 +998,8 @@ class Ai4ScienceClient:
         """Download one of your models and unpack it into dest/<name>-v<n>/,
         an MLflow model directory: mlflow.pyfunc.load_model(<that dir>) runs
         it anywhere with the libraries in its requirements.txt."""
+        if self.mlflow_token:
+            return self._native().download_model(name, version, Path(dest))
         resp = _request(
             "GET",
             f"{self.base_url}/api/v1/mlflow/models/{name}/versions/{version}/download",
