@@ -280,6 +280,16 @@ class Ai4ScienceClient:
         runtime= can then run there (cluster= / tier=); a cluster you
         have no login for is never picked. user/token above stay your
         login on the default cluster.
+    mlflow_token, mlflow_username : str | None
+        Your own login on the deployment's MLflow server, so a tracked job
+        (track=True, runtime="apptainer" or the default container) can log
+        to its run itself. A token alone is sent as a bearer token; with
+        mlflow_username (which may differ from your Slurm user) it is the
+        password of a username/password login. Fall back to
+        MLFLOW_TRACKING_USERNAME + MLFLOW_TRACKING_PASSWORD, else
+        MLFLOW_TRACKING_TOKEN: the names the mlflow library reads itself,
+        so the same .env also works for your own mlflow calls. Never sent
+        for untracked, ray or eessi jobs.
 
     Raises
     ------
@@ -297,6 +307,8 @@ class Ai4ScienceClient:
         token: str | None = None,
         interval: int | None = None,
         logins: dict[str, tuple[str, str]] | None = None,
+        mlflow_token: str | None = None,
+        mlflow_username: str | None = None,
     ):
         if base_url is None or user is None or token is None or interval is None:
             # Importing here (not at module load) triggers config.py's
@@ -309,6 +321,13 @@ class Ai4ScienceClient:
             token = token or os.environ.get("SLURM_TOKEN")
             if interval is None:
                 interval = int(os.environ.get("AI4SCIENCE_POLL_INTERVAL", "10"))
+            if mlflow_token is None:
+                env_user = mlflow_username or os.environ.get("MLFLOW_TRACKING_USERNAME")
+                env_password = os.environ.get("MLFLOW_TRACKING_PASSWORD")
+                if env_user and env_password:
+                    mlflow_username, mlflow_token = env_user, env_password
+                else:
+                    mlflow_token = os.environ.get("MLFLOW_TRACKING_TOKEN")
         missing = [
             name
             for name, value in [("base_url", base_url), ("user", user), ("token", token)]
@@ -325,6 +344,18 @@ class Ai4ScienceClient:
         self.token = token
         self.default_interval = interval
         self.logins = dict(logins or {})
+        self.mlflow_token = mlflow_token or None
+        self.mlflow_username = mlflow_username if self.mlflow_token else None
+
+    def _mlflow_login(self, track: bool) -> dict[str, str | None]:
+        """The MLflow login fields of a submission: only a tracked job's
+        run is reachable with it, so other jobs never carry it."""
+        if not track:
+            return {}
+        return {
+            "mlflow_token": self.mlflow_token,
+            "mlflow_username": self.mlflow_username,
+        }
 
     def _auth_headers(self) -> dict[str, str]:
         """Slurm credentials sent on every job read (/logs, /results, the
@@ -486,6 +517,7 @@ class Ai4ScienceClient:
                     hf_token=hf_token,
                     track=track,
                     experiment_name=experiment_name,
+                    **self._mlflow_login(track and runtime == "apptainer"),
                     user=self.user,
                     token=self.token,
                     cluster=cluster,
@@ -534,6 +566,7 @@ class Ai4ScienceClient:
                 cluster=cluster,
                 track=track,
                 experiment_name=experiment_name,
+                **self._mlflow_login(track),
             )
 
         endpoint = _ENDPOINT_BY_CONTAINER[container]  # type: ignore[index]

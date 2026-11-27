@@ -287,6 +287,34 @@ job_handle.results()                 # non-blocking status check
 result = job_handle.wait()           # block until done, when ready
 ```
 
+### MLflow tracking
+
+`track=True` makes the server open an MLflow run for the job. For the job
+to log to that run itself (metrics, artifacts, models) on a deployment
+whose MLflow server has its own accounts, give the client your MLflow
+login. In a `.env` file, with the same names the `mlflow` library reads:
+
+```bash
+# A token...
+MLFLOW_TRACKING_TOKEN=...
+# ...or a username/password login (the username may differ from SLURM_USER)
+MLFLOW_TRACKING_USERNAME=jane.doe
+MLFLOW_TRACKING_PASSWORD=...
+```
+
+Or in code:
+
+```python
+client = Ai4ScienceClient(mlflow_token="...", mlflow_username="jane.doe")
+job_handle = client.submit(script, runtime="apptainer", track=True)
+```
+
+The login is sent only with tracked jobs on the default container or
+`runtime="apptainer"`; the job gets it as `MLFLOW_TRACKING_TOKEN`, or as
+`MLFLOW_TRACKING_USERNAME`/`MLFLOW_TRACKING_PASSWORD` when a username is
+set, next to `MLFLOW_TRACKING_URI` and `MLFLOW_RUN_ID`, so plain
+`mlflow.start_run()` logs to the job's run.
+
 ## Examples
 
 - **[`examples/demo_notebook.ipynb`](examples/demo_notebook.ipynb)** --

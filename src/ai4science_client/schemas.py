@@ -58,6 +58,11 @@ class JobSubmitRequest(BaseModel):
     before these fields existed. Field names must stay in sync with the
     server's EphemeralJobRequest.track/experiment_name
     (app/common/schemas/request_schemas.py in ai4science-poc).
+
+    mlflow_token/mlflow_username: the caller's own login on the MLflow
+    server, for a tracked job that logs to its run itself (see
+    Ai4ScienceClient). Omitted when unset, so older servers see the same
+    body as before.
     """
 
     dependencies: list[str] = Field(default_factory=list)
@@ -70,6 +75,8 @@ class JobSubmitRequest(BaseModel):
     cluster: str | None = None
     track: bool = False
     experiment_name: str | None = None
+    mlflow_token: str | None = None
+    mlflow_username: str | None = None
 
 
 class RayJobSubmitRequest(BaseModel):
@@ -139,6 +146,8 @@ class JobSubmitV2Request(BaseModel):
     hf_token: str | None = None
     track: bool = False
     experiment_name: str | None = None
+    mlflow_token: str | None = None
+    mlflow_username: str | None = None
     user: str
     token: str
     cluster: str | None = None
