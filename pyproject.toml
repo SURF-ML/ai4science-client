@@ -3,7 +3,7 @@ name = "ai4science-client"
 version = "0.1.0"
 description = "Thin Python client for running functions on Snellius via the ai4science API"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11.5"
 license = { text = "MIT" }
 authors = [{ name = "SURF" }]
 dependencies = [
