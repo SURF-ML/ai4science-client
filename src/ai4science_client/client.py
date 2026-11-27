@@ -18,8 +18,8 @@ exceptions.py -- this file is HTTP plumbing only.
 from __future__ import annotations
 
 import codecs
-import io
 import os
+import tempfile
 import time
 import zipfile
 from pathlib import Path
@@ -341,6 +341,9 @@ class Ai4ScienceClient:
         if mlflow_token is None:
             # Always consulted: these are the mlflow library's own variables,
             # often set for it rather than in this client's .env.
+            # shortcut: a login set for another MLflow server is taken too and
+            # sent with tracked jobs; read AI4SCIENCE_-prefixed names once
+            # users commonly run their own MLflow next to this one.
             env_user = mlflow_username or os.environ.get("MLFLOW_TRACKING_USERNAME")
             env_password = os.environ.get("MLFLOW_TRACKING_PASSWORD")
             if env_user and env_password:
@@ -514,11 +517,9 @@ class Ai4ScienceClient:
             the server start an MLflow run for this job, tagged by its
             job_id; experiment_name picks which MLflow experiment it
             lands in (server picks a fallback name if omitted). Works
-            with both container="ephemeral" and container="ray". This
-            is intentionally minimal for now -- nothing here yet reads
-            the run back (no run URL, no metrics helpers on the
-            returned Ai4ScienceJob); that's a natural follow-up once
-            there's a public MLflow UI route to point people at.
+            with both container="ephemeral" and container="ray". Read
+            the run back with job.tracking_run(), and an experiment's
+            runs with runs().
 
         Note: this method's contract is unchanged by artifacts support --
         by the time a script reaches here, any artifacts have already
@@ -529,8 +530,8 @@ class Ai4ScienceClient:
         Raises
         ------
         ValueError
-            If tier or cluster is given with container="ray" or with
-            runtime=, if modules= is given without runtime="eessi", or if
+            If tier or cluster is given with container="ray", if
+            modules= is given without runtime="eessi", or if
             container= is not "ephemeral"/"ray" without runtime=.
         Ai4ScienceConnectionError
             If the ai4science API is unreachable.
@@ -1007,10 +1008,15 @@ class Ai4ScienceClient:
             params={"user": self.user},
             headers=self._auth_headers(),
             timeout=600,
+            stream=True,
         )
         target = Path(dest) / f"{name}-v{resp.headers['X-Model-Version']}"
-        with zipfile.ZipFile(io.BytesIO(resp.content)) as archive:
-            archive.extractall(target)
+        # Through a temporary file: a model can be larger than free memory.
+        with tempfile.TemporaryFile() as archive_file:
+            for chunk in resp.iter_content(chunk_size=1 << 20):
+                archive_file.write(chunk)
+            with zipfile.ZipFile(archive_file) as archive:
+                archive.extractall(target)
         return target
 
     def job(self, job_id: str) -> Ai4ScienceJob:

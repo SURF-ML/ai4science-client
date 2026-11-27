@@ -46,6 +46,9 @@ def mlflow(monkeypatch):
         return {k: os.environ.get(k) for k in LOGIN_VARS if os.environ.get(k)}
 
     class FakeClient:
+        def __init__(self, tracking_uri=None, registry_uri=None):
+            calls.append(("server", tracking_uri, registry_uri))
+
         def get_run(self, run_id):
             calls.append(("get_run", run_id, seen()))
             return _run(run_id)
@@ -64,8 +67,9 @@ def mlflow(monkeypatch):
                 latest_versions=[SimpleNamespace(version="2"), SimpleNamespace(version="5")]
             )
 
-    def download_artifacts(uri, dst_path):
+    def download_artifacts(uri, dst_path, tracking_uri=None, registry_uri=None):
         calls.append(("download", uri, seen()))
+        calls.append(("server", tracking_uri, registry_uri))
         return dst_path
 
     module = ModuleType("mlflow")
@@ -114,11 +118,11 @@ def test_a_tracked_jobs_run_comes_from_mlflow_with_the_users_login(server, mlflo
     assert run["metrics"] == {"accuracy": 0.9}
     assert run["ui_url"] == "https://mlflow.example.org/#/experiments/7/runs/r1"
     assert mlflow == [
+        ("server", CONFIG["tracking_uri"], CONFIG["tracking_uri"]),
         (
             "get_run",
             "r1",
             {
-                "MLFLOW_TRACKING_URI": "https://mlflow.example.org",
                 "MLFLOW_TRACKING_USERNAME": "jane.doe",
                 "MLFLOW_TRACKING_PASSWORD": "pat",
             },
@@ -160,3 +164,21 @@ def test_the_environment_login_is_restored_after_a_call(server, mlflow, monkeypa
     _client(mlflow_token="pat").runs("iris", limit=1)
     assert os.environ["MLFLOW_TRACKING_URI"] == "file:./mlruns"
     assert "MLFLOW_TRACKING_TOKEN" not in os.environ
+
+
+def test_every_call_names_the_deployments_server(server, mlflow, tmp_path):
+    client = _client(mlflow_token="pat")
+    client.runs("iris", limit=1)
+    client.download_model("iris", dest=tmp_path)
+    servers = {c[1:] for c in mlflow if c[0] == "server"}
+    assert servers == {(CONFIG["tracking_uri"], CONFIG["tracking_uri"])}
+
+
+def test_a_model_without_versions_has_a_clear_error(server, mlflow, tmp_path):
+    import sys
+
+    sys.modules["mlflow"].MlflowClient.get_registered_model = lambda self, name: (
+        SimpleNamespace(latest_versions=[])
+    )
+    with pytest.raises(Ai4ScienceError, match="no versions yet"):
+        _client(mlflow_token="pat").download_model("iris", dest=tmp_path)

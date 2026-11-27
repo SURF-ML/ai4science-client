@@ -14,11 +14,11 @@ import contextlib
 import os
 from pathlib import Path
 from typing import Any
+from unittest import mock
 
 from .exceptions import Ai4ScienceError
 
 _LOGIN_VARS = (
-    "MLFLOW_TRACKING_URI",
     "MLFLOW_TRACKING_USERNAME",
     "MLFLOW_TRACKING_PASSWORD",
     "MLFLOW_TRACKING_TOKEN",
@@ -48,21 +48,22 @@ class NativeMlflow:
     @contextlib.contextmanager
     def _login(self):
         """mlflow reads its login from the environment (artifact downloads only
-        from there): set it for one call, then restore what was there."""
-        saved = {name: os.environ.pop(name, None) for name in _LOGIN_VARS}
-        os.environ["MLFLOW_TRACKING_URI"] = self.config["tracking_uri"]
-        if self._username:
-            os.environ["MLFLOW_TRACKING_USERNAME"] = self._username
-            os.environ["MLFLOW_TRACKING_PASSWORD"] = self._token
-        else:
-            os.environ["MLFLOW_TRACKING_TOKEN"] = self._token
-        try:
-            yield _mlflow()
-        finally:
-            for name, value in saved.items():
+        from there): set it for one call, then restore what was there. The
+        server is passed to every call instead, because mlflow.set_tracking_uri
+        in the caller's code would override an environment variable."""
+        with mock.patch.dict(os.environ):
+            for name in _LOGIN_VARS:
                 os.environ.pop(name, None)
-                if value is not None:
-                    os.environ[name] = value
+            if self._username:
+                os.environ["MLFLOW_TRACKING_USERNAME"] = self._username
+                os.environ["MLFLOW_TRACKING_PASSWORD"] = self._token
+            else:
+                os.environ["MLFLOW_TRACKING_TOKEN"] = self._token
+            yield _mlflow()
+
+    def _client(self, mlflow):
+        uri = self.config["tracking_uri"]
+        return mlflow.MlflowClient(tracking_uri=uri, registry_uri=uri)
 
     def _ui_url(self, run) -> str:
         return (
@@ -73,7 +74,7 @@ class NativeMlflow:
     def run(self, run_id: str) -> dict[str, Any]:
         """Same shape as GET /api/v1/mlflow/{job_id}/run."""
         with self._login() as mlflow:
-            run = mlflow.MlflowClient().get_run(run_id)
+            run = self._client(mlflow).get_run(run_id)
         return {
             "run_id": run.info.run_id,
             "status": run.info.status,
@@ -87,7 +88,7 @@ class NativeMlflow:
         """Same shape as the API's run list: newest first."""
         name = self.config["experiment_prefix"] + experiment_name
         with self._login() as mlflow:
-            client = mlflow.MlflowClient()
+            client = self._client(mlflow)
             experiment = client.get_experiment_by_name(name)
             if experiment is None:
                 return []
@@ -111,15 +112,21 @@ class NativeMlflow:
     def download_model(self, name: str, version: int | str, dest: Path) -> Path:
         """Into dest/<name>-v<n>/, like the API's download."""
         registered = self.config["model_prefix"] + name
+        uri = self.config["tracking_uri"]
         with self._login() as mlflow:
             if str(version) == "latest":
-                model = mlflow.MlflowClient().get_registered_model(registered)
+                model = self._client(mlflow).get_registered_model(registered)
+                if not model.latest_versions:
+                    raise Ai4ScienceError(f"Model {name} has no versions yet.")
                 version = max(int(v.version) for v in model.latest_versions)
             target = Path(dest) / f"{name}-v{version}"
             target.mkdir(parents=True, exist_ok=True)
             # The model directory: the path mlflow wrote, inside target.
             return Path(
                 mlflow.artifacts.download_artifacts(
-                    f"models:/{registered}/{version}", dst_path=str(target)
+                    f"models:/{registered}/{version}",
+                    dst_path=str(target),
+                    tracking_uri=uri,
+                    registry_uri=uri,
                 )
             )

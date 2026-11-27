@@ -19,6 +19,7 @@ def _response(body=None, content=b"", headers=None):
     resp.status_code, resp.ok, resp.reason = 200, True, "OK"
     resp.json.return_value = body
     resp.content = content
+    resp.iter_content.return_value = [content[:10], content[10:]]
     resp.headers = headers or {}
     return resp
 
